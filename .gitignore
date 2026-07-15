@@ -1,0 +1,13 @@
+# Large data split files
+data/
+
+# Model checkpoints
+best_kasper.pth
+
+# Visualizations
+*.png
+
+# Python caches and system files
+__pycache__/
+.DS_Store
+*.pyc
