@@ -9,7 +9,7 @@ def test_master_pipeline():
 
     # Dimensions
     batch_size = 32
-    num_inputs = 33
+    num_inputs = 14
     num_regimes = 3
 
     # Generate dummy input and target tensors

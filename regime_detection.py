@@ -140,10 +140,6 @@ class RegimeDetectionLayer(nn.Module):
         )
         self.to_logits = nn.Linear(hidden_dim, n_regimes)
 
-        # Regime weight matrix W in R^{n_regimes x n_features}, used only
-        # for the orthogonality regularizer (Eq. 19).
-        self.regime_weights = nn.Parameter(torch.randn(n_regimes, n_features) * 0.1)
-
     def forward(self, phi_t: torch.Tensor, tau: float = 1.0, hard: bool = False):
         """
         Args:
@@ -162,26 +158,37 @@ class RegimeDetectionLayer(nn.Module):
         p = F.gumbel_softmax(logits, tau=tau, hard=hard, dim=-1)     # Eq. 17
         return z, p, logits
 
-    def orthogonality_loss(self) -> torch.Tensor:
-        """L_orth = || W W^T - I_R ||_F^2   (Eq. 19)"""
-        w = self.regime_weights
-        gram = w @ w.T
-        eye = torch.eye(self.n_regimes, device=w.device, dtype=w.dtype)
-        return torch.norm(gram - eye, p="fro") ** 2
+    # NOTE: orthogonality_loss (Eq. 19) is now a method of RegimeAdaptiveForecastingLayer.
+    # Per the paper, W ∈ R^{R×F} where w^(r)_j is the forecast weight for feature j in regime r
+    # — that is self.weights in Layer 2, not the routing logits here.
 
 
-def contrastive_loss(z: torch.Tensor, regime_ids: torch.Tensor) -> torch.Tensor:
+def contrastive_loss(z: torch.Tensor, regime_ids: torch.Tensor, margin: float = 1.0) -> torch.Tensor:
     """
-    L_contrastive = E[ ||z_i - z_j||^2 * y_ij ]   (Eq. 18)
+    Contrastive loss with both attractive and repulsive terms (Eq. 18).
 
-    y_ij = 1 if samples i and j are assigned to the same regime, else 0.
-    Averaged over all off-diagonal pairs in the batch.
+    Attractive: penalize large sq_dist for same-regime pairs → compacts clusters.
+    Repulsive:  penalize small sq_dist for diff-regime pairs → pushes clusters apart.
+
+    Without repulsion, representation collapse is mathematically guaranteed (distances -> 0),
+    which makes the routing unstable.
+
+    Args:
+        z:          (batch, hidden_dim) pre-softmax embeddings from KAN 1.
+        regime_ids: (batch,) hard regime assignment, e.g. p.argmax(-1).
+        margin:     minimum sq_dist required between different-regime pairs.
     """
-    diff = z.unsqueeze(1) - z.unsqueeze(0)                # (B, B, hidden_dim)
-    sq_dist = (diff ** 2).sum(-1)                          # (B, B)
+    diff = z.unsqueeze(1) - z.unsqueeze(0)          # (B, B, D)
+    sq_dist = (diff ** 2).sum(-1)                    # (B, B)
+
     same_regime = (regime_ids.unsqueeze(1) == regime_ids.unsqueeze(0)).float()
-    mask = 1.0 - torch.eye(z.shape[0], device=z.device)    # drop self-pairs
-    return (sq_dist * same_regime * mask).sum() / mask.sum().clamp_min(1.0)
+    diff_regime = 1.0 - same_regime
+    mask = 1.0 - torch.eye(z.shape[0], device=z.device)  # exclude self-pairs
+
+    attractive = (sq_dist * same_regime * mask).sum()
+    repulsive  = (F.relu(margin - sq_dist) * diff_regime * mask).sum()
+
+    return (attractive + repulsive) / mask.sum().clamp_min(1.0)
 
 
 if __name__ == "__main__":
@@ -199,16 +206,13 @@ if __name__ == "__main__":
     regime_ids = p.argmax(dim=-1)
 
     l_contrastive = contrastive_loss(z, regime_ids)
-    l_orth = model.orthogonality_loss()
 
     print("embedding z:        ", tuple(z.shape))
     print("regime probs p:     ", tuple(p.shape), "rows sum to", round(p.sum(-1)[0].item(), 4))
     print("regime logits:      ", tuple(logits.shape))
     print("regime assignment:  ", regime_ids[:10].tolist())
     print("contrastive loss:   ", round(l_contrastive.item(), 4))
-    print("orthogonality loss: ", round(l_orth.item(), 4))
 
     # Sanity check: gradients flow back through the spline knots' weights
-    loss = l_contrastive + 0.01 * l_orth
-    loss.backward()
+    l_contrastive.backward()
     print("spline weight grad ok:", model.spline.splines[0].w.grad is not None)

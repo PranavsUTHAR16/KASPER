@@ -76,11 +76,12 @@ class KASPER(nn.Module):
         """
         # 1. Evaluate Layer 1 to get probabilities and latent representations
         embeddings, probs, logits = self.layer1(phi_t, tau=tau, hard=hard)
-        
-        # 2. Evaluate Layer 2 to get final predictions guided by the probabilities
-        # Layer 2 returns: (y_hat, forecast_per_regime, phi_per_regime)
+
+        # 2. Evaluate Layer 2 to get final predictions guided by the probabilities.
+        #    Standard joint gradient flow — the paper does not use stop-gradient.
+        #    Layer 2 returns: (y_hat, forecast_per_regime, phi_per_regime)
         final_forecast, _, _ = self.layer2(phi_t, probs)
-        
+
         return final_forecast, probs, embeddings
 
 

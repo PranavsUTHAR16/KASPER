@@ -5,16 +5,12 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from kasper import KASPER
 
-# All 33 candidate features from preprocessed SPY dataset
+# Core financial features from preprocessed SPY dataset (14 features)
 FEATURE_NAMES = [
     "HL_Spread", "OC_Spread", "Log_Return_1d", "Log_Return_7d", 
     "Log_Return_High_1d", "Log_Return_Low_1d", "Log_Return_Open_1d", 
     "Log_Return_Volume_1d", "Rolling_Volatility_21d", "Volatility_Ratio_21d", 
-    "ATR_21d", "Velocity", "Acceleration", "Delta_Volume", "Volume_State_Ratio",
-    "Volatility_Regime_63d", "Momentum_Regime_63d", "Acceleration_Regime_63d",
-    "DOW_1", "DOW_2", "DOW_3", "DOW_4",
-    "Month_2", "Month_3", "Month_4", "Month_5", "Month_6",
-    "Month_7", "Month_8", "Month_9", "Month_10", "Month_11", "Month_12"
+    "ATR_21d", "Velocity", "Acceleration", "Delta_Volume"
 ]
 
 def get_regime_forecasts(model, phi_t):

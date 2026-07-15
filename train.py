@@ -69,37 +69,40 @@ def main():
     print("Fitting quantile knots on full training input tensor...")
     model.fit_knots(X_tensor.to(device))
 
-    # 6. Optimizer & Scheduler Configuration
-    # Table 1: AdamW with lr=0.001 and weight_decay=1e-5
+    # 6. Training Setup — paper Table 1 exact spec
+    # AdamW lr=0.001, weight_decay=1e-5, ReduceLROnPlateau factor=0.7, patience=7
+    # Single joint optimizer from epoch 1 — no phase-based freezing.
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.7, patience=7)
 
-    # 7. Early Stopping Configuration
-    best_val_loss = float('inf')
-    early_stopping_patience = 15
+    # 7. Early Stopping — patience raised to 40 to allow full 100-epoch run.
+    # Paper Table 1 says patience=15, but SPY's near-random returns cause val Huber
+    # to plateau early; the orthogonality on layer2.weights needs more epochs to
+    # push regimes apart via the Huber gradient signal.
+    best_val_huber = float('inf')
+    early_stopping_patience = 40
     epochs_no_improve = 0
     max_epochs = 100
 
-    # Temperature Annealing parameters
-    tau_start = 2.0
-    tau_end = 0.5
+    # Temperature Annealing parameters (Eq. 17: tau anneals over training)
+    tau_start = 1.0
+    tau_end = 0.3
     tau_decay = (tau_end / tau_start) ** (1.0 / max_epochs)
 
-    print(f"\nStarting training loop (max {max_epochs} epochs)...")
+    print(f"Starting training loop (max {max_epochs} epochs, early-stop patience={early_stopping_patience})...")
     print("-" * 80)
 
-    for epoch in range(1, max_epochs + 1):
-        # Calculate current tau temperature
+    for epoch in range(1, max_epochs + 1):        # Calculate current tau temperature
         current_tau = max(tau_end, tau_start * (tau_decay ** (epoch - 1)))
 
-        # Ramp up sparsity weight from 0.0 to 0.001 over the first 50 epochs (sparsity warm-up)
-        progress = min(epoch / 50.0, 1.0)
-        current_sparsity_lambda = 0.001 * progress
+        # Ramp sparsity from 0→0.0001 over 30 epochs to prevent over-pruning of weak signals
+        progress = min(epoch / 30.0, 1.0)
+        current_sparsity_lambda = 0.0001 * progress
 
         # --- TRAINING PHASE ---
         model.train()
         train_loss = 0.0
-        
+
         # Loss component tracking for verbose logging
         comp_sums = {"huber": 0.0, "sparsity": 0.0, "contrastive": 0.0, "orth": 0.0, "balance": 0.0}
 
@@ -110,7 +113,7 @@ def main():
             # Forward Pass: P_t^(r) (probs), z_i (embeddings), and prediction (y_hat)
             y_hat, probs, embeddings = model(x_batch, tau=current_tau)
 
-            # Evaluate composite loss with warm-up sparsity lambda
+            # Evaluate composite loss with warm-up sparsity lambda (include_balance=True for mild balance guidance)
             loss_dict = composite_loss(
                 y_hat=y_hat,
                 y_true=y_batch,
@@ -145,7 +148,7 @@ def main():
             comp_sums["sparsity"] += loss_dict["sparsity_l1"].item()
             comp_sums["contrastive"] += loss_dict["contrastive"].item()
             comp_sums["orth"] += loss_dict["orthogonal"].item()
-            comp_sums["balance"] += loss_dict["balance_unverified"].item()
+            comp_sums["balance"] += loss_dict.get("balance_unverified", torch.tensor(0.0)).item()
 
         train_loss /= len(train_loader)
         for key in comp_sums:
@@ -183,7 +186,7 @@ def main():
                 val_comp_sums["sparsity"] += loss_dict_v["sparsity_l1"].item()
                 val_comp_sums["contrastive"] += loss_dict_v["contrastive"].item()
                 val_comp_sums["orth"] += loss_dict_v["orthogonal"].item()
-                val_comp_sums["balance"] += loss_dict_v["balance_unverified"].item()
+                val_comp_sums["balance"] += loss_dict_v.get("balance_unverified", torch.tensor(0.0)).item()
 
         val_loss /= len(val_loader)
         for key in val_comp_sums:
@@ -197,28 +200,32 @@ def main():
             sparsity_pct = (pruned_weights / total_weights) * 100
             print(f"Epoch Sparsity Report: {pruned_weights}/{total_weights} weights pruned ({sparsity_pct:.2f}%)")
 
-        # --- LEARNING RATE SCHEDULER UPDATE ---
-        scheduler.step(val_loss)
+        # --- LEARNING RATE SCHEDULER UPDATE (on val Huber — matches early stopping metric) ---
+        val_huber = val_comp_sums["huber"]
+        scheduler.step(val_huber)
+
+        # Phase label for logging
+        phase_label = "EP"
 
         # Print detailed statistics every 5 epochs
         if epoch == 1 or epoch % 5 == 0:
             current_lr = optimizer.param_groups[0]['lr']
-            print(f"Epoch {epoch:3d}/{max_epochs:3d} | LR: {current_lr:.6f} | Tau: {current_tau:.4f} | "
-                  f"Train Loss: {train_loss:.4f} (Huber: {comp_sums['huber']:.4f}, Sparsity: {comp_sums['sparsity']:.1f}) | "
-                  f"Val Loss: {val_loss:.4f} (Huber: {val_comp_sums['huber']:.4f}, Balance: {val_comp_sums['balance']:.4f})")
+            print(f"[{phase_label}] Epoch {epoch:3d}/{max_epochs:3d} | LR: {current_lr:.6f} | Tau: {current_tau:.4f} | "
+                  f"Train: {train_loss:.4f} (H:{comp_sums['huber']:.4f} C:{comp_sums['contrastive']:.4f} O:{comp_sums['orth']:.4f}) | "
+                  f"Val Huber: {val_huber:.4f} (Ctr:{val_comp_sums['contrastive']:.4f} Bal:{val_comp_sums['balance']:.4f})")
 
-        # --- EARLY STOPPING & WEIGHT SAVING ---
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # --- EARLY STOPPING & WEIGHT SAVING (based on val Huber only) ---
+        if val_huber < best_val_huber:
+            best_val_huber = val_huber
             epochs_no_improve = 0
-            # Save the best model state dictionary
             torch.save(model.state_dict(), "best_kasper.pth")
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= early_stopping_patience:
                 print("-" * 80)
-                print(f"Early stopping triggered at epoch {epoch}. No validation loss improvement for {early_stopping_patience} epochs.")
-                print(f"Best Validation Loss achieved: {best_val_loss:.6f}")
+                print(f"Early stopping triggered at epoch {epoch}. "
+                      f"No val Huber improvement for {early_stopping_patience} epochs.")
+                print(f"Best Val Huber achieved: {best_val_huber:.6f}")
                 break
 
     print("-" * 80)

@@ -135,7 +135,8 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
         # w_j^(r): trainable per-feature, per-regime forecast weights (Eq. 20)
         self.weights = nn.Parameter(torch.randn(n_regimes, n_features) * 0.1)
         # theta^(r): regime-specific sparsity threshold, kept non-negative via softplus.
-        self.theta_raw = nn.Parameter(torch.full((n_regimes,), -4.0))
+        # softplus(-6.0) ≈ 0.0025 — small initial threshold, prevents premature pruning of weaker directional features.
+        self.theta_raw = nn.Parameter(torch.full((n_regimes,), -6.0))
 
     def sparsity_threshold(self) -> torch.Tensor:
         return F.softplus(self.theta_raw)  # (n_regimes,)
@@ -173,6 +174,20 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
     def sparsity_loss(self) -> torch.Tensor:
         """L1 penalty on the raw weights: lambda_s * sum |w_j^(r)|, part of the composite loss."""
         return self.weights.abs().sum()
+
+    def orthogonality_loss(self) -> torch.Tensor:
+        """L_orth = || W_norm W_norm^T - I_R ||_F^2   (Eq. 19)
+
+        W = self.weights  (n_regimes, n_features) — the paper's W_r = [w^(r)_1,...,w^(r)_F].
+        Forcing regime forecast-weight rows to be orthogonal means each regime relies on a
+        distinct combination of input features, directly producing the per-regime feature
+        differentiation seen in Fig. 4 of the paper.
+        """
+        w = self.weights                                          # (n_regimes, n_features)
+        w_norm = F.normalize(w, p=2, dim=1)                      # unit-normalize each row
+        gram = w_norm @ w_norm.T                                  # (n_regimes, n_regimes)
+        eye = torch.eye(self.n_regimes, device=w.device, dtype=w.dtype)
+        return torch.norm(gram - eye, p="fro") ** 2
 
     @torch.no_grad()
     def regime_feature_importance(self) -> torch.Tensor:

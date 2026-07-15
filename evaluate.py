@@ -9,16 +9,12 @@ import matplotlib.pyplot as plt
 
 from kasper import KASPER
 
-# Hardcoded selected features from preprocessed SPY dataset (from SelectKBest output)
+# Core financial features from preprocessed SPY dataset (14 features)
 FEATURE_NAMES = [
-    'OC_Spread', 
-    'Log_Return_1d', 
-    'Log_Return_High_1d', 
-    'Log_Return_Low_1d', 
-    'Log_Return_Open_1d', 
-    'Velocity', 
-    'Acceleration', 
-    'Acceleration_Regime_63d'
+    "HL_Spread", "OC_Spread", "Log_Return_1d", "Log_Return_7d", 
+    "Log_Return_High_1d", "Log_Return_Low_1d", "Log_Return_Open_1d", 
+    "Log_Return_Volume_1d", "Rolling_Volatility_21d", "Volatility_Ratio_21d", 
+    "ATR_21d", "Velocity", "Acceleration", "Delta_Volume"
 ]
 
 def calculate_financial_metrics(strategy_returns, actual_returns, y_hat, active_regimes, is_dummy=False, dataset_type="test"):

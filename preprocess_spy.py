@@ -93,26 +93,20 @@ def preprocess_spy_data():
         "Velocity": velocity,
         "Acceleration": acceleration,
         "Delta_Volume": delta_vol,
-        "Volume_State_Ratio": volume_state_ratio,
-        "Volatility_Regime_63d": volatility_regime,
-        "Momentum_Regime_63d": momentum_regime,
-        "Acceleration_Regime_63d": acceleration_regime,
         "Target_Return_Next_Day": target
     })
     
     # ======================================================================
     # BUG 8 FIX: Add actual temporal dummies (Paper Algorithm 1, Step 2;
-    # Fig 2 "One-Hot Encoding").  The original code concatenated features
-    # with itself (a no-op).  We now create day-of-week (4 dummies, Mon=0
-    # dropped to avoid collinearity) and month (11 dummies, Jan dropped).
+    # Fig 2 "One-Hot Encoding").  
+    # COMMENTED OUT TO PREVENT SPURIOUS CALENDAR OVERFITTING.
     # ======================================================================
-    dow = features.index.dayofweek                         # 0=Mon .. 4=Fri
-    month = features.index.month                           # 1=Jan  .. 12=Dec
-
-    for d in range(1, 5):                                  # Tue–Fri dummies
-        features[f"DOW_{d}"] = (dow == d).astype(float)
-    for m in range(2, 13):                                 # Feb–Dec dummies
-        features[f"Month_{m}"] = (month == m).astype(float)
+    # dow = features.index.dayofweek                         # 0=Mon .. 4=Fri
+    # month = features.index.month                           # 1=Jan  .. 12=Dec
+    # for d in range(1, 5):                                  # Tue–Fri dummies
+    #     features[f"DOW_{d}"] = (dow == d).astype(float)
+    # for m in range(2, 13):                                 # Feb–Dec dummies
+    #     features[f"Month_{m}"] = (month == m).astype(float)
 
     # Drop rows containing NaNs due to rolling window warmups and next-day target shift
     features_clean = features.dropna()
@@ -133,12 +127,7 @@ def preprocess_spy_data():
         "HL_Spread", "OC_Spread", "Log_Return_1d", "Log_Return_7d", 
         "Log_Return_High_1d", "Log_Return_Low_1d", "Log_Return_Open_1d", 
         "Log_Return_Volume_1d", "Rolling_Volatility_21d", "Volatility_Ratio_21d", 
-        "ATR_21d", "Velocity", "Acceleration", "Delta_Volume", "Volume_State_Ratio",
-        "Volatility_Regime_63d", "Momentum_Regime_63d", "Acceleration_Regime_63d",
-        # Temporal dummies (Bug 8 fix)
-        "DOW_1", "DOW_2", "DOW_3", "DOW_4",
-        "Month_2", "Month_3", "Month_4", "Month_5", "Month_6",
-        "Month_7", "Month_8", "Month_9", "Month_10", "Month_11", "Month_12",
+        "ATR_21d", "Velocity", "Acceleration", "Delta_Volume"
     ] 
     
     # 10. No Feature Selection (Unstarve the Network - use all 33 candidate features)

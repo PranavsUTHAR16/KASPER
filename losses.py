@@ -44,9 +44,9 @@ from regime_detection import RegimeDetectionLayer, contrastive_loss
 from regime_forecasting import RegimeAdaptiveForecastingLayer
 
 LAMBDA_SPARSITY = 0.001
-LAMBDA_CONTRASTIVE = 0.01
-LAMBDA_ORTHOGONAL = 0.01
-LAMBDA_BALANCE = 0.05  # only applied if include_balance=True — see fidelity note above
+LAMBDA_CONTRASTIVE = 0.5   # raised to 0.5 to force strong cluster separation in embedding space (avoiding collapse)
+LAMBDA_ORTHOGONAL = 0.01    # Table 1: orthogonality regularization weight
+LAMBDA_BALANCE = 0.01  # lowered from 0.05 to allow more concentrated/unbalanced regimes (e.g., smaller but cleaner bear regime)
 
 
 def l1_sparsity(*modules: torch.nn.Module) -> torch.Tensor:
@@ -99,11 +99,12 @@ def composite_loss(
     # Sparsity restricted to Layer 2 forecasting parameters only (consistent with flowchart / task alignment)
     l_sparsity = kan2.sparsity_loss()
     l_contrastive = contrastive_loss(z, regime_ids)
-    l_orth = kan1.orthogonality_loss()
+    # Eq. 19: orthogonality on kan2.weights (W ∈ R^{R×F}, w^(r)_j = forecast weight for feature j in regime r)
+    l_orth = kan2.orthogonality_loss()
 
-    # Scale Huber Loss by 10.0 to amplify the forecasting signal
+    # Rebalanced: Enforce orthogonality and contrastive constraints more strongly
     total = (
-        10.0 * l_huber
+        1.0 * l_huber
         + lambda_s * l_sparsity
         + LAMBDA_CONTRASTIVE * l_contrastive
         + LAMBDA_ORTHOGONAL * l_orth
