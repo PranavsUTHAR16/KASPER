@@ -124,8 +124,8 @@ class KasperCompositeLoss(nn.Module):
         # 1. Huber Loss (for forecasting accuracy)
         l_huber = self.huber_loss(predictions, targets)
 
-        # 2. Sparsity Loss (L1 norm on all model parameters)
-        l_sparsity = sum(torch.abs(p).sum() for p in model.parameters())
+        # 2. Sparsity Loss (L1 norm on Layer 2 parameters only)
+        l_sparsity = sum(torch.abs(p).sum() for p in model.layer2.parameters())
 
         # 3. Contrastive Loss (regime clustering)
         l_contrastive = self.contrastive_loss(embeddings, probs)
