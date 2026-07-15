@@ -193,6 +193,8 @@ if __name__ == "__main__":
         n_features=n_features, hidden_dim=hidden_dim, n_regimes=n_regimes
     )
 
+    # Stand-in for a batch of standardized features (output of Sec. 4.1's
+    # SelectKBest + StandardScaler step: HL_spread, OC_spread, ATR, etc.)
     phi_t = torch.randn(batch_size, n_features)
 
     z, p, logits = model(phi_t, tau=1.0)

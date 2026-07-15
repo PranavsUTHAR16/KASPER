@@ -35,13 +35,16 @@ samples." Because of that, this module keeps it structurally separate:
       way to implement "discourage regime collapse," not a reproduction
       of a stated formula. Its dict key is "balance_unverified" so it can
       never be silently mistaken for a verified term downstream.
+
+Requires kasper_kan1_regime_detection.py and kasper_kan2_regime_forecasting.py
+in the same directory.
 """
 
 import torch
 import torch.nn.functional as F
 
-from regime_detection import RegimeDetectionLayer, contrastive_loss
-from regime_forecasting import RegimeAdaptiveForecastingLayer
+from kasper_kan1_regime_detection import RegimeDetectionLayer, contrastive_loss
+from kasper_kan2_regime_forecasting import RegimeAdaptiveForecastingLayer
 
 LAMBDA_SPARSITY = 0.001
 LAMBDA_CONTRASTIVE = 0.01
@@ -99,8 +102,7 @@ def composite_loss(
                         term on top of the four paper-verified ones.
     """
     l_huber = F.huber_loss(y_hat, y_true)
-    # Sparsity restricted to Layer 2 forecasting parameters only (consistent with flowchart / task alignment)
-    l_sparsity = kan2.sparsity_loss()
+    l_sparsity = l1_sparsity(kan1, kan2)
     l_contrastive = contrastive_loss(z, regime_ids)
     l_orth = kan1.orthogonality_loss()
 

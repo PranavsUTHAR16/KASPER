@@ -5,7 +5,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
 from kasper import KASPER
-from losses import KasperCompositeLoss
+from losses import composite_loss
 
 def main():
     # 1. Device Setup
@@ -40,10 +40,10 @@ def main():
 
     # Convert to PyTorch tensors
     X_tensor = torch.tensor(X_train, dtype=torch.float32)
-    y_tensor = torch.tensor(y_train_scaled, dtype=torch.float32).unsqueeze(1)
+    y_tensor = torch.tensor(y_train_scaled, dtype=torch.float32)
 
     X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
-    y_val_tensor = torch.tensor(y_val_scaled, dtype=torch.float32).unsqueeze(1)
+    y_val_tensor = torch.tensor(y_val_scaled, dtype=torch.float32)
 
     # Create DataLoaders
     train_loader = DataLoader(TensorDataset(X_tensor, y_tensor), batch_size=32, shuffle=True)
@@ -61,21 +61,13 @@ def main():
         n_linear=3,
         n_cubic=2,
         dropout_rate=0.2,
-        num_knots=5,
+        num_knots=8, # maps to n_basis in the new KASPER Layer 2 B-spline
         sparsity_threshold=1e-3
     ).to(device)
 
     # Crucial Step: Before training starts, call model.fit_knots on training data
     print("Fitting quantile knots on full training input tensor...")
     model.fit_knots(X_tensor.to(device))
-
-    # 5. Instantiate Composite Loss Function
-    criterion = KasperCompositeLoss(
-        lambda_s=0.001,
-        lambda_c=0.01,
-        lambda_o=0.01,
-        lambda_b=0.05
-    ).to(device)
 
     # 6. Optimizer & Scheduler Configuration
     # Table 1: AdamW with lr=0.001 and weight_decay=1e-5
@@ -115,23 +107,27 @@ def main():
             y_hat, probs, embeddings = model(x_batch, tau=current_tau)
 
             # Evaluate composite loss
-            loss, components = criterion(
-                predictions=y_hat,
-                targets=y_batch,
-                embeddings=embeddings,
-                probs=probs,
-                model=model
+            loss_dict = composite_loss(
+                y_hat=y_hat,
+                y_true=y_batch,
+                z=embeddings,
+                p=probs,
+                regime_ids=probs.argmax(dim=-1),
+                kan1=model.layer1,
+                kan2=model.layer2,
+                include_balance=True
             )
+            loss = loss_dict["total"]
 
             # Backpropagation
             optimizer.zero_grad()
             loss.backward()
 
             # Ensure gradients are flowing to Layer 1 (Regime Detection)
-            if model.layer1.regime_proj.weight.grad is None:
+            if model.layer1.to_logits.weight.grad is None:
                 print("CRITICAL WARNING: No gradients flowing to Layer 1! p_i and z_i are detached.")
             else:
-                grad_norm = model.layer1.regime_proj.weight.grad.norm().item()
+                grad_norm = model.layer1.to_logits.weight.grad.norm().item()
                 if grad_norm == 0.0:
                     print("WARNING: Layer 1 gradients are exactly 0.0. Learning has stopped.")
 
@@ -140,8 +136,11 @@ def main():
             optimizer.step()
 
             train_loss += loss.item()
-            for key in comp_sums:
-                comp_sums[key] += components[key]
+            comp_sums["huber"] += loss_dict["huber"].item()
+            comp_sums["sparsity"] += loss_dict["sparsity_l1"].item()
+            comp_sums["contrastive"] += loss_dict["contrastive"].item()
+            comp_sums["orth"] += loss_dict["orthogonal"].item()
+            comp_sums["balance"] += loss_dict["balance_unverified"].item()
 
         train_loss /= len(train_loader)
         for key in comp_sums:
@@ -161,17 +160,24 @@ def main():
                 # Pass decaying tau during validation to keep behavior aligned
                 y_hat_v, probs_v, embeddings_v = model(x_val_b, tau=current_tau)
 
-                loss_v, components_v = criterion(
-                    predictions=y_hat_v,
-                    targets=y_val_b,
-                    embeddings=embeddings_v,
-                    probs=probs_v,
-                    model=model
+                loss_dict_v = composite_loss(
+                    y_hat=y_hat_v,
+                    y_true=y_val_b,
+                    z=embeddings_v,
+                    p=probs_v,
+                    regime_ids=probs_v.argmax(dim=-1),
+                    kan1=model.layer1,
+                    kan2=model.layer2,
+                    include_balance=True
                 )
+                loss_v = loss_dict_v["total"]
 
                 val_loss += loss_v.item()
-                for key in val_comp_sums:
-                    val_comp_sums[key] += components_v[key]
+                val_comp_sums["huber"] += loss_dict_v["huber"].item()
+                val_comp_sums["sparsity"] += loss_dict_v["sparsity_l1"].item()
+                val_comp_sums["contrastive"] += loss_dict_v["contrastive"].item()
+                val_comp_sums["orth"] += loss_dict_v["orthogonal"].item()
+                val_comp_sums["balance"] += loss_dict_v["balance_unverified"].item()
 
         val_loss /= len(val_loader)
         for key in val_comp_sums:
@@ -179,9 +185,7 @@ def main():
 
         # --- SPARSITY MONITOR REPORT (Equation 22) ---
         with torch.no_grad():
-            w_raw = model.layer2.w
-            theta = model.layer2.sparsity_threshold
-            w_sparse = torch.sign(w_raw) * torch.relu(torch.abs(w_raw) - theta)
+            w_sparse = model.layer2.effective_weights()
             total_weights = w_sparse.numel()
             pruned_weights = (w_sparse == 0).sum().item()
             sparsity_pct = (pruned_weights / total_weights) * 100

@@ -19,6 +19,9 @@ B-splines (k=3) with an 8-basis grid per (regime, feature) pair, initialized
 from percentile bounds the same way as KAN 1's spline activation — a
 reasonable default consistent with the paper's KAN-based design, not a
 verbatim reproduction of an unstated hyperparameter.
+
+Requires: kasper_kan1_regime_detection.py in the same directory for the
+end-to-end demo at the bottom (KAN 1 -> KAN 2).
 """
 
 import torch
@@ -135,6 +138,8 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
         # w_j^(r): trainable per-feature, per-regime forecast weights (Eq. 20)
         self.weights = nn.Parameter(torch.randn(n_regimes, n_features) * 0.1)
         # theta^(r): regime-specific sparsity threshold, kept non-negative via softplus.
+        # Initialized near zero so untrained weights aren't immediately zeroed out;
+        # the threshold effectively grows relative to |w| as training progresses.
         self.theta_raw = nn.Parameter(torch.full((n_regimes,), -4.0))
 
     def sparsity_threshold(self) -> torch.Tensor:
@@ -178,7 +183,10 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
     def regime_feature_importance(self) -> torch.Tensor:
         """
         Quick weight-magnitude proxy for feature importance per regime,
-        normalized to sum to 1 within each regime.
+        normalized to sum to 1 within each regime — useful for a sanity
+        check against Fig. 4 of the paper. This is NOT the paper's Monte
+        Carlo Shapley method (Sec. 3.3); that requires coalition sampling
+        over held-out predictions and is a separate module.
         """
         w_eff = self.effective_weights().abs()
         return w_eff / w_eff.sum(dim=1, keepdim=True).clamp_min(1e-8)
@@ -192,7 +200,7 @@ if __name__ == "__main__":
     kan2 = RegimeAdaptiveForecastingLayer(n_features=n_features, n_regimes=n_regimes)
 
     phi_t = torch.randn(batch_size, n_features)
-    p = F.softmax(torch.randn(batch_size, n_regimes), dim=-1)
+    p = F.softmax(torch.randn(batch_size, n_regimes), dim=-1)  # stand-in for KAN 1 output
 
     y_hat, forecast_per_regime, phi_per_regime = kan2(phi_t, p)
 
@@ -209,3 +217,22 @@ if __name__ == "__main__":
     loss.backward()
     print("spline beta grad ok:   ", kan2.splines[0][0].beta.grad is not None)
     print("weight grad ok:        ", kan2.weights.grad is not None)
+
+    # --- End-to-end demo: KAN 1 -> KAN 2 ---
+    try:
+        from kasper_kan1_regime_detection import RegimeDetectionLayer
+
+        kan1 = RegimeDetectionLayer(n_features=n_features, hidden_dim=64, n_regimes=n_regimes)
+        z, p_learned, logits = kan1(phi_t, tau=1.0)
+        y_hat_full, _, _ = kan2(phi_t, p_learned)
+
+        full_loss = F.huber_loss(y_hat_full, target) + 1e-3 * kan2.sparsity_loss() + 1e-2 * kan1.orthogonality_loss()
+        full_loss.backward()
+
+        print("\n--- Full KASPER forward (KAN 1 -> KAN 2) ---")
+        print("final y_hat:            ", tuple(y_hat_full.shape))
+        print("grad reached KAN1 spline:", kan1.spline.splines[0].w.grad is not None)
+        print("grad reached KAN2 spline:", kan2.splines[0][0].beta.grad is not None)
+    except ImportError:
+        print("\n(kasper_kan1_regime_detection.py not found alongside this file — "
+              "standalone KAN 2 test above still passed.)")

@@ -28,33 +28,9 @@ def get_regime_forecasts(model, phi_t):
     Returns:
         torch.Tensor: Un-aggregated predictions of shape (B, num_regimes).
     """
-    # 1. Normalize features to [0, 1] range
-    x_min = model.layer2.x_min.unsqueeze(0)
-    x_max = model.layer2.x_max.unsqueeze(0)
-    x_norm = (phi_t - x_min) / (x_max - x_min + 1e-8)
-    x_norm = torch.clamp(x_norm, 0.0, 1.0)  # Shape: (B, num_features)
-
-    # 2. Localized basis spline approximation (Gaussian RBF basis functions)
-    knots = torch.linspace(0.0, 1.0, model.layer2.num_knots, device=phi_t.device)  # Shape: (num_knots,)
-    sigma = 1.0 / (model.layer2.num_knots - 1)  # Bandwidth factor
-
-    # Shape: (B, num_features, num_knots)
-    basis = torch.exp(-0.5 * ((x_norm.unsqueeze(-1) - knots.unsqueeze(0).unsqueeze(0)) / sigma) ** 2)
-
-    # 3. Apply trainable spline coefficients (beta) and sum over the K dimension
-    # Using einsum: phi_{b, r, f} = sum_k basis_{b, f, k} * beta_{r, f, k}
-    # Result shape: [B, num_regimes, num_features]
-    phi = torch.einsum('bfk,rfk->brf', basis, model.layer2.beta)
-
-    # 4. Apply Sparsity Enforcement via soft-thresholding
-    w_sparse = torch.sign(model.layer2.w) * torch.relu(torch.abs(model.layer2.w) - model.layer2.sparsity_threshold)
-
-    # 5. Generate regime-specific forecasts
-    # Using einsum: y_hat_{b, r} = sum_f phi_{b, r, f} * w_sparse_{r, f}
-    # Result shape: [B, num_regimes]
-    y_hat = torch.einsum('brf,rf->br', phi, w_sparse)
-
-    return y_hat
+    dummy_p = torch.ones(phi_t.shape[0], model.layer2.n_regimes, device=phi_t.device) / model.layer2.n_regimes
+    _, forecast_per_regime, _ = model.layer2(phi_t, dummy_p)
+    return forecast_per_regime
 
 
 def estimate_shapley(model, x, num_permutations=50):
@@ -73,7 +49,7 @@ def estimate_shapley(model, x, num_permutations=50):
     D = x.shape[0]  # 33 features
     
     # Initialize Shapley values buffer
-    shapley_values = torch.zeros(model.layer2.num_regimes, D, device=x.device)
+    shapley_values = torch.zeros(model.layer2.n_regimes, D, device=x.device)
     
     for m in range(num_permutations):
         # Sample a random permutation of feature indices
@@ -94,7 +70,7 @@ def estimate_shapley(model, x, num_permutations=50):
         diffs = y_hat[1:] - y_hat[:-1]
         
         # Accumulate diffs into the corresponding permutation indices:
-        shapley_values.scatter_add_(1, perm.unsqueeze(0).expand(model.layer2.num_regimes, -1), diffs.t())
+        shapley_values.scatter_add_(1, perm.unsqueeze(0).expand(model.layer2.n_regimes, -1), diffs.t())
         
     # Average across all permutations
     shapley_values /= num_permutations
@@ -143,7 +119,7 @@ def main():
         n_linear=3,
         n_cubic=2,
         dropout_rate=0.2,
-        num_knots=5,
+        num_knots=8, # maps to n_basis in new layer
         sparsity_threshold=1e-3
     ).to(device)
 
@@ -156,13 +132,14 @@ def main():
 
     print(f"Loading weights from '{weights_path}'...")
     model.load_state_dict(torch.load(weights_path, map_location=device))
-    model.layer2.sparsity_threshold = 0.0
+    # Disable sparsity thresholding during explanation by filling theta_raw with a large negative value
+    model.layer2.theta_raw.data.fill_(-100.0)
     model.eval()
 
     # 4. Get assigned regimes from Layer 1 classification
     print("\nClassifying test set regimes using Layer 1...")
     with torch.no_grad():
-        probs, _ = model.layer1(X_test_tensor.to(device), tau=1.0)
+        _, probs, _ = model.layer1(X_test_tensor.to(device), tau=1.0)
     assigned_regimes = torch.argmax(probs, dim=-1).cpu()  # Shape: (B,)
     
     # Print sample distribution across regimes
@@ -170,14 +147,15 @@ def main():
         count = torch.sum(assigned_regimes == r).item()
         print(f" - Samples assigned to Regime {r}: {count:3d} ({count/batch_size*100.1:.1f}%)")
 
-    # 5. Compute Shapley Values for all test samples
-    print("\nComputing Monte Carlo Shapley values for all test samples...")
+    # 5. Compute Shapley Values for a subset of test samples for performance
+    num_samples_to_process = min(30, batch_size)
+    print(f"\nComputing Monte Carlo Shapley values for {num_samples_to_process} test samples...")
     print(f"Permutations per sample: 50 | Total features: {num_inputs}")
     all_shapley = []
     
-    for i in range(batch_size):
-        if (i + 1) % 50 == 0 or i == 0:
-            print(f" - Processing sample {i+1:3d}/{batch_size:3d}...")
+    for i in range(num_samples_to_process):
+        if (i + 1) % 10 == 0 or i == 0:
+            print(f" - Processing sample {i+1:3d}/{num_samples_to_process:3d}...")
         x_sample = X_test_tensor[i].to(device)
         # Get Shapley values shape: (num_regimes, num_inputs)
         shapley = estimate_shapley(model, x_sample, num_permutations=50)
@@ -191,8 +169,10 @@ def main():
     print("REGIME-SPECIFIC ATTRIBUTIONS & RULE EXTRACTION")
     print("=" * 60)
 
+    assigned_regimes_subset = assigned_regimes[:num_samples_to_process]
+
     for r in range(num_regimes):
-        indices = (assigned_regimes == r).nonzero(as_tuple=True)[0]
+        indices = (assigned_regimes_subset == r).nonzero(as_tuple=True)[0]
         
         print(f"\n>>> REGIME {r} Rules:")
         if len(indices) == 0:

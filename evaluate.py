@@ -260,7 +260,7 @@ def evaluate_model(dataset_type="test"):
         n_linear=3,
         n_cubic=2,
         dropout_rate=0.2,
-        num_knots=5,
+        num_knots=8,
         sparsity_threshold=1e-3
     ).to(device)
 
@@ -275,8 +275,8 @@ def evaluate_model(dataset_type="test"):
 
     print(f"Loading weights from '{weights_path}'...")
     model.load_state_dict(torch.load(weights_path, map_location=device))
-    # Disable sparsity thresholding during evaluation to analyze unpruned weights
-    model.layer2.sparsity_threshold = 0.0
+    # Disable sparsity thresholding during evaluation to analyze unpruned weights by filling theta_raw with a large negative value
+    model.layer2.theta_raw.data.fill_(-100.0)
     model.eval()
 
     # 5. Run Model Inference
