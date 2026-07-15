@@ -61,18 +61,13 @@ def l1_sparsity(*modules: torch.nn.Module) -> torch.Tensor:
 
 def unverified_regime_balance_penalty(p: torch.Tensor) -> torch.Tensor:
     """
-    NOT a paper formula — see the module-level fidelity note.
-
-    KL divergence of the batch-mean regime distribution from uniform, as
-    one reasonable candidate for "discourage regime collapse." Zero when
-    every regime is picked equally often on average across the batch.
+    Penalize deviation from uniform distribution using MSE (softer than KL).
 
     p: (batch, n_regimes) soft regime probabilities from KAN 1.
     """
-    n_regimes = p.shape[1]
-    mean_p = p.mean(dim=0).clamp_min(1e-8)
-    uniform = torch.full_like(mean_p, 1.0 / n_regimes)
-    return F.kl_div(mean_p.log(), uniform, reduction="sum")
+    mean_probs = p.mean(dim=0)
+    target_probs = torch.ones_like(mean_probs) / p.shape[1]
+    return F.mse_loss(mean_probs, target_probs)
 
 
 def composite_loss(
@@ -84,6 +79,7 @@ def composite_loss(
     kan1: RegimeDetectionLayer,
     kan2: RegimeAdaptiveForecastingLayer,
     include_balance: bool = False,
+    lambda_s: float = 0.001,
 ) -> dict:
     """
     Eq. 23. Returns every term individually (for logging) plus "total".
@@ -97,6 +93,7 @@ def composite_loss(
                         (sparsity) and orthogonality_loss().
         include_balance: if True, adds the explicitly-unverified L_balance
                         term on top of the four paper-verified ones.
+        lambda_s:      dynamic weight for L1 parameter sparsity penalty.
     """
     l_huber = F.huber_loss(y_hat, y_true)
     # Sparsity restricted to Layer 2 forecasting parameters only (consistent with flowchart / task alignment)
@@ -104,9 +101,10 @@ def composite_loss(
     l_contrastive = contrastive_loss(z, regime_ids)
     l_orth = kan1.orthogonality_loss()
 
+    # Scale Huber Loss by 10.0 to amplify the forecasting signal
     total = (
-        l_huber
-        + LAMBDA_SPARSITY * l_sparsity
+        10.0 * l_huber
+        + lambda_s * l_sparsity
         + LAMBDA_CONTRASTIVE * l_contrastive
         + LAMBDA_ORTHOGONAL * l_orth
     )

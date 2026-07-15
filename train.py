@@ -92,6 +92,10 @@ def main():
         # Calculate current tau temperature
         current_tau = max(tau_end, tau_start * (tau_decay ** (epoch - 1)))
 
+        # Ramp up sparsity weight from 0.0 to 0.001 over the first 50 epochs (sparsity warm-up)
+        progress = min(epoch / 50.0, 1.0)
+        current_sparsity_lambda = 0.001 * progress
+
         # --- TRAINING PHASE ---
         model.train()
         train_loss = 0.0
@@ -106,7 +110,7 @@ def main():
             # Forward Pass: P_t^(r) (probs), z_i (embeddings), and prediction (y_hat)
             y_hat, probs, embeddings = model(x_batch, tau=current_tau)
 
-            # Evaluate composite loss
+            # Evaluate composite loss with warm-up sparsity lambda
             loss_dict = composite_loss(
                 y_hat=y_hat,
                 y_true=y_batch,
@@ -115,7 +119,8 @@ def main():
                 regime_ids=probs.argmax(dim=-1),
                 kan1=model.layer1,
                 kan2=model.layer2,
-                include_balance=True
+                include_balance=True,
+                lambda_s=current_sparsity_lambda
             )
             loss = loss_dict["total"]
 
@@ -168,7 +173,8 @@ def main():
                     regime_ids=probs_v.argmax(dim=-1),
                     kan1=model.layer1,
                     kan2=model.layer2,
-                    include_balance=True
+                    include_balance=True,
+                    lambda_s=current_sparsity_lambda
                 )
                 loss_v = loss_dict_v["total"]
 
