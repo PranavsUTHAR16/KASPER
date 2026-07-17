@@ -17,6 +17,35 @@ FEATURE_NAMES = [
     "ATR_21d", "Velocity", "Acceleration", "Delta_Volume"
 ]
 
+def regime_feature_importance(X: np.ndarray, feature_names: list, assignments: np.ndarray):
+    """
+    Diagnostic only. Ranks all 14 input features by how strongly they differ
+    across discovered regimes (one-way ANOVA F-stat) — tells you definitively
+    which axis the split landed on, rather than inferring it indirectly.
+    """
+    from scipy import stats
+    import pandas as pd
+    rows = []
+    # Find unique regimes that have at least some samples
+    unique_regimes = [r for r in np.unique(assignments) if (assignments == r).sum() > 1]
+    if len(unique_regimes) < 2:
+        print("\n  ANOVA Diagnostic skipped: Fewer than 2 active regimes with > 1 samples.")
+        return None
+        
+    for j, name in enumerate(feature_names):
+        groups = [X[assignments == r, j] for r in unique_regimes]
+        try:
+            f_stat, p_val = stats.f_oneway(*groups)
+        except Exception:
+            f_stat, p_val = 0.0, 1.0
+        rows.append({"feature": name, "F_stat": f_stat, "p_value": p_val})
+    df = pd.DataFrame(rows).sort_values("F_stat", ascending=False).reset_index(drop=True)
+    
+    print("\n── Regime-wise Feature Differentiation (ANOVA F-stat) ────────")
+    print(df.to_string(index=False))
+    print("─────────────────────────────────────────────────────────────")
+    return df
+
 def calculate_financial_metrics(strategy_returns, actual_returns, y_hat, active_regimes, is_dummy=False, dataset_type="test"):
     """
     Calculates and prints global and regime-specific forecasting/financial metrics,
@@ -307,6 +336,9 @@ def evaluate_model(dataset_type="test"):
 
     # 8. Calculate Financial/ML Metrics and Plot
     calculate_financial_metrics(strategy_returns, y_data, y_hat_unscaled, active_regimes, is_dummy=False, dataset_type=dataset_type)
+
+    # 9. Diagnostic: One-Way ANOVA F-Stat Feature Importance
+    regime_feature_importance(X_data, FEATURE_NAMES, active_regimes)
 
 
 if __name__ == "__main__":

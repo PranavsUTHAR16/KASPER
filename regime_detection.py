@@ -8,7 +8,9 @@ Regimes" (TMLR, 02/2026).
 Covers:
     - Hybrid spline activation f(x) = L(x) + C(x)          (Eq. 14)
     - Percentile-based knot initialization, robust to outliers (Eq. 15-16)
-    - Feature embedding: (Linear -> BatchNorm -> GELU -> Dropout) x 2
+    - Per-feature embedding: SplineActivation → Linear(1, d) per feature
+    - Stack embeddings: concatenate to (batch, n_features * feature_embed_dim)
+    - MLP block: (Linear → BatchNorm → GELU → Dropout) x 2 → Linear
     - Gumbel-Softmax differentiable regime classification   (Eq. 17)
     - Contrastive loss for intra-regime compactness         (Eq. 18)
     - Orthogonality regularization on regime weight vectors (Eq. 19)
@@ -90,41 +92,93 @@ class SplineActivation(nn.Module):
         return lin_out + cub_out
 
 
-class FeatureSplineBlock(nn.Module):
-    """Applies an independent SplineActivation to every input feature (column)."""
+class FeatureEmbeddingBlock(nn.Module):
+    """
+    Per-feature embedding pipeline: SplineActivation → Linear(1, feature_embed_dim).
 
-    def __init__(self, n_features: int, n_linear: int = 3, n_cubic: int = 2):
+    Each scalar feature is first transformed by its own SplineActivation (which
+    handles quantile normalization and the hybrid linear-cubic basis), and then
+    projected into a ``feature_embed_dim``-dimensional vector by an independent
+    linear layer. The resulting per-feature vectors are concatenated into a flat
+    tensor of shape ``(batch, n_features * feature_embed_dim)``.
+    """
+
+    def __init__(self, n_features: int, feature_embed_dim: int = 4,
+                 n_linear: int = 3, n_cubic: int = 2):
         super().__init__()
+        self.n_features = n_features
+        self.feature_embed_dim = feature_embed_dim
         self.splines = nn.ModuleList([
             SplineActivation(n_linear=n_linear, n_cubic=n_cubic)
             for _ in range(n_features)
         ])
+        # Independent linear projection per feature: scalar → d-dim vector
+        self.projectors = nn.ModuleList([
+            nn.Linear(1, feature_embed_dim)
+            for _ in range(n_features)
+        ])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, n_features) -> (batch, n_features), each column transformed independently
-        outs = [self.splines[j](x[:, j]) for j in range(x.shape[1])]
-        return torch.stack(outs, dim=1)
+        """
+        Args:
+            x: (batch, n_features) raw input features.
+
+        Returns:
+            (batch, n_features * feature_embed_dim) concatenated per-feature embeddings.
+        """
+        embedded = []
+        for j in range(self.n_features):
+            # (batch,) -> spline -> (batch,) -> unsqueeze -> (batch, 1) -> Linear -> (batch, d)
+            s = self.splines[j](x[:, j])           # (batch,)
+            e = self.projectors[j](s.unsqueeze(1)) # (batch, feature_embed_dim)
+            embedded.append(e)
+        # Concatenate all per-feature embeddings: (batch, n_features * feature_embed_dim)
+        return torch.cat(embedded, dim=1)
 
 
 class RegimeDetectionLayer(nn.Module):
     """
-    KAN Layer 1 (Section 3.1): spline activation -> embedding -> Gumbel-Softmax.
+    KAN Layer 1 (Section 3.1): per-feature embedding -> MLP -> Gumbel-Softmax.
 
-    Pipeline (matches Fig. 2):
-        Phi_t --SplineActivation-->
-              --stack features (Feature Embedding)-->
-              --(Linear -> BatchNorm -> GELU -> Dropout) x 2-->  z_i
-              --Linear--> regime logits
-              --Gumbel-Softmax(tau)--> p_i  (soft regime probabilities)
+    Pipeline:
+        phi_t
+          │
+          ▼
+        SplineActivation (per feature, with quantile normalization)
+          │
+          ▼
+        Feature Embedding (nn.Linear(1, feature_embed_dim) per feature)
+          │
+          ▼
+        Stack / Concatenate  →  (batch, n_features * feature_embed_dim)
+          │
+          ▼
+        MLP Block: (Linear → BatchNorm → GELU → Dropout) × 2 → Linear
+          │
+          ▼  z  (batch, hidden_dim)
+          │
+          ▼
+        Gumbel-Softmax(τ)  →  p  (batch, n_regimes)
     """
 
     def __init__(self, n_features: int, hidden_dim: int = 64,
                  n_regimes: int = 3, dropout: float = 0.1,
-                 n_linear: int = 3, n_cubic: int = 2):
+                 n_linear: int = 3, n_cubic: int = 2,
+                 feature_embed_dim: int = 4):
         super().__init__()
         self.n_regimes = n_regimes
+        self.feature_embed_dim = feature_embed_dim
 
-        self.spline = FeatureSplineBlock(n_features, n_linear, n_cubic)
+        # Per-feature: SplineActivation + independent Linear(1 → feature_embed_dim)
+        self.spline = FeatureEmbeddingBlock(
+            n_features=n_features,
+            feature_embed_dim=feature_embed_dim,
+            n_linear=n_linear,
+            n_cubic=n_cubic,
+        )
+
+        # MLP input is the concatenated per-feature embeddings
+        mlp_input_dim = n_features * feature_embed_dim
 
         def block(in_dim: int, out_dim: int) -> nn.Sequential:
             return nn.Sequential(
@@ -135,7 +189,7 @@ class RegimeDetectionLayer(nn.Module):
             )
 
         self.embed = nn.Sequential(
-            block(n_features, hidden_dim),
+            block(mlp_input_dim, hidden_dim),
             block(hidden_dim, hidden_dim),
         )
         self.to_logits = nn.Linear(hidden_dim, n_regimes)
@@ -148,17 +202,23 @@ class RegimeDetectionLayer(nn.Module):
             hard:  if True, straight-through hard sampling.
 
         Returns:
-            z:      (batch, hidden_dim)  pre-softmax embedding, used by the contrastive loss.
+            z:      (batch, hidden_dim)  embedding used by the contrastive loss.
             p:      (batch, n_regimes)   soft regime probabilities, consumed by KAN 2.
             logits: (batch, n_regimes)   raw regime logits, for diagnostics.
         """
-        spline_feats = self.spline(phi_t)                          # Eq. 14-16
-        z = self.embed(spline_feats)                                # (L->BN->G->D) x 2
+        # Step 1: Spline + per-feature projection → concatenated embedding
+        # (batch, n_features) → (batch, n_features * feature_embed_dim)
+        embedded_feats = self.spline(phi_t)                         # Eq. 14-16 + per-feature Linear
+
+        # Step 2: Global MLP across all stacked feature embeddings
+        z = self.embed(embedded_feats)                              # (batch, hidden_dim)
+
+        # Step 3: Route to regime logits → Gumbel-Softmax
         logits = self.to_logits(z)                                  # f_r(Phi_t)
-        p = F.gumbel_softmax(logits, tau=tau, hard=hard, dim=-1)     # Eq. 17
+        p = F.gumbel_softmax(logits, tau=tau, hard=hard, dim=-1)    # Eq. 17
         return z, p, logits
 
-    # NOTE: orthogonality_loss (Eq. 19) is now a method of RegimeAdaptiveForecastingLayer.
+    # NOTE: orthogonality_loss (Eq. 19) is a method of RegimeAdaptiveForecastingLayer.
     # Per the paper, W ∈ R^{R×F} where w^(r)_j is the forecast weight for feature j in regime r
     # — that is self.weights in Layer 2, not the routing logits here.
 
@@ -194,10 +254,12 @@ def contrastive_loss(z: torch.Tensor, regime_ids: torch.Tensor, margin: float = 
 if __name__ == "__main__":
     torch.manual_seed(0)
 
-    batch_size, n_features, hidden_dim, n_regimes = 32, 8, 64, 3
+    batch_size, n_features, hidden_dim, n_regimes = 32, 14, 64, 3
+    feature_embed_dim = 4
 
     model = RegimeDetectionLayer(
-        n_features=n_features, hidden_dim=hidden_dim, n_regimes=n_regimes
+        n_features=n_features, hidden_dim=hidden_dim, n_regimes=n_regimes,
+        feature_embed_dim=feature_embed_dim
     )
 
     phi_t = torch.randn(batch_size, n_features)
@@ -207,12 +269,14 @@ if __name__ == "__main__":
 
     l_contrastive = contrastive_loss(z, regime_ids)
 
-    print("embedding z:        ", tuple(z.shape))
-    print("regime probs p:     ", tuple(p.shape), "rows sum to", round(p.sum(-1)[0].item(), 4))
-    print("regime logits:      ", tuple(logits.shape))
-    print("regime assignment:  ", regime_ids[:10].tolist())
-    print("contrastive loss:   ", round(l_contrastive.item(), 4))
+    print("stacked embed shape :  ", tuple(model.spline(phi_t).shape))  # (32, 14*4=56)
+    print("embedding z:           ", tuple(z.shape))                     # (32, 64)
+    print("regime probs p:        ", tuple(p.shape), "rows sum to", round(p.sum(-1)[0].item(), 4))
+    print("regime logits:         ", tuple(logits.shape))
+    print("regime assignment:     ", regime_ids[:10].tolist())
+    print("contrastive loss:      ", round(l_contrastive.item(), 4))
 
-    # Sanity check: gradients flow back through the spline knots' weights
+    # Sanity check: gradients flow back through the spline knots' weights AND the projectors
     l_contrastive.backward()
-    print("spline weight grad ok:", model.spline.splines[0].w.grad is not None)
+    print("spline  w grad ok:", model.spline.splines[0].w.grad is not None)
+    print("project w grad ok:", model.spline.projectors[0].weight.grad is not None)

@@ -13,7 +13,7 @@ class KASPER(nn.Module):
 
     def __init__(self, num_inputs=33, hidden_dim=64, num_regimes=3,
                  grid_size=10, n_linear=3, n_cubic=2, dropout_rate=0.2,
-                 num_knots=5, sparsity_threshold=1e-3):
+                 num_knots=5, sparsity_threshold=1e-3, feature_embed_dim=4):
         """
         Args:
             num_inputs (int): Flat input features size.
@@ -25,6 +25,7 @@ class KASPER(nn.Module):
             dropout_rate (float): Dropout probability in Layer 1.
             num_knots (int): Number of basis functions in Layer 2 (n_basis).
             sparsity_threshold (float): Not used directly in new implementation constructor.
+            feature_embed_dim (int): Per-feature embedding dimension in Layer 1 (default: 4).
         """
         super().__init__()
         
@@ -35,7 +36,8 @@ class KASPER(nn.Module):
             n_regimes=num_regimes,
             dropout=dropout_rate,
             n_linear=n_linear,
-            n_cubic=n_cubic
+            n_cubic=n_cubic,
+            feature_embed_dim=feature_embed_dim,
         )
         
         # Layer 2: Regime-Adaptive Forecasting Layer
