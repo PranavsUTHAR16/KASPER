@@ -105,3 +105,25 @@ The TMLR paper reports metrics of $R^2 \approx 0.89$, Sharpe $\approx 12.02$, an
 1. An annualized Sharpe ratio of **~12.02** on daily single-asset (SPY) directional forecasting is mathematically impossible in real financial markets without lookahead data leakage (e.g., using same-day close $C_t$ to predict $C_t$).
 2. In a strict, leak-free, closed-left rolling window pipeline on 8 daily technical/price features, daily stock returns exhibit high noise-to-signal ratios.
 3. This canonical repository now provides a **fully verified, leak-free, bug-free implementation** of KASPER. The empirical finding—that 8 daily technical features yield a zero-edge signal ($\text{Hit Rate} \approx 53.47\%$, $\text{Mean Sharpe} \approx +0.76$, matching market drift)—is a rigorous, honest representation of market predictability under strict temporal separation.
+
+---
+
+## 6. Regime Differentiation Elicitation Experiments (Levers 1–3)
+
+Under strict guardrails (joint Validation + 8-Window Rolling Walk-Forward evaluation and Ground Rule #2 Cheating Audits), three controlled levers were evaluated to test whether genuine regime differentiation could be elicited:
+
+### **Lever 1: Sparsity Relaxation Sweep ($\lambda_{\text{sparsity}} \in [0.0010, 0.0000]$)**
+* **Active Weight Recovery**: Dropping $\lambda_s \to 0$ restored all 24/24 active weights and increased inter-regime weight variation by 4x ($0.039 \to 0.160$).
+* **Out-of-Sample Result**: Mean out-of-sample directional accuracy across 8 rolling windows remained unchanged at **53.54% – 53.85%** (Min 44.44%, Max 60.00%). Sparsity alone was not the bottleneck restricting regime differentiation.
+
+### **Lever 2: Richer Feature Expansion (21 Candidate Features, $K \in \{12, 16\}$)**
+* **Feature Set**: Added 13 leak-free indicators (RSI-14, MACD, 5-day realized volatility, volume spreads, day-of-week seasonality).
+* **Out-of-Sample Result**: Out-of-sample directional accuracy across 8 rolling windows remained at **53.36% – 53.57%**, and out-of-sample Sharpe matched the market buy-and-hold baseline (+0.9264 vs +0.9388).
+
+### **Lever 3: Explicit Per-Regime Bias Term $b^{(r)}$ & Ground Rule #2 Audit**
+* **Architectural Mod**: Added learnable per-regime bias $b^{(r)}$ to Eq. 20 with $L_2$ variance regularization $\lambda_b \text{Var}(b^{(r)})$.
+* **Cheating Audit Metric**: Measured ratio of regime bias magnitude to feature-conditional variation ($\text{std}(\hat{y} \mid r)$). The ratio was **5.27 to 9.13**, revealing that **>85% of apparent regime differentiation was driven by constant offset shortcuts**, not feature-conditional responsiveness.
+* **Out-of-Sample Result**: Out-of-sample directional accuracy remained at **53.29%**.
+
+### **Stop Rule Conclusion**
+Across all three levers, regime-conditional predictions failed to demonstrate a statistically significant directional hit rate beyond market drift (53.3%–53.6% hit rate), and explicit bias terms produced non-conditional offset shortcuts rather than feature-responsive regime differentiation. This confirms the null result under a leak-free, guarded evaluation framework.
