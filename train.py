@@ -58,8 +58,9 @@ def main():
     train_dataset = TensorDataset(X_tensor, torch.tensor(y_train_norm, dtype=torch.float32))
     val_dataset = TensorDataset(X_val_tensor, torch.tensor(y_val_norm, dtype=torch.float32))
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+    # Batch size = 128 (increased from 32 to stabilize contrastive cluster formation per Secondary Lever)
+    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
 
     # 4. Instantiate Model & Fit Knots
     num_inputs = X_train.shape[1]

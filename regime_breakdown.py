@@ -55,9 +55,12 @@ def run_regime_breakdown(dataset_type="test"):
     if os.path.exists(train_x_path):
         model.fit_knots(torch.tensor(np.load(train_x_path), dtype=torch.float32).to(device))
     else:
-        model.fit_knots(X_tensor.to(device))
-
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+        print(f"Loading weights from '{weights_path}'...")
+    checkpoint = torch.load(weights_path, map_location=device)
+    if isinstance(checkpoint, dict) and "model" in checkpoint:
+        model.load_state_dict(checkpoint["model"])
+    else:
+        model.load_state_dict(checkpoint)
     model.eval()
 
     with torch.no_grad():

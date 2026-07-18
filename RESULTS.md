@@ -127,3 +127,24 @@ Under strict guardrails (joint Validation + 8-Window Rolling Walk-Forward evalua
 
 ### **Stop Rule Conclusion**
 Across all three levers, regime-conditional predictions failed to demonstrate a statistically significant directional hit rate beyond market drift (53.3%–53.6% hit rate), and explicit bias terms produced non-conditional offset shortcuts rather than feature-responsive regime differentiation. This confirms the null result under a leak-free, guarded evaluation framework.
+
+---
+
+## 7. Feature-Selection Redundancy Audit & Paper Fig. 3 Target Recalibration
+
+### **1. Empirical Feature Redundancy Audit (Step 1)**
+* **Problem**: Naive `SelectKBest(f_regression, k=8)` evaluated candidates independently, selecting four redundant same-day return features (`Log_Return_1d`, `Log_Return_Open_1d`, `Log_Return_Low_1d`, `Log_Return_High_1d`) with pairwise correlations of **0.68 to 0.81**.
+* **Impact**: This crowded out `HL_Spread` ($r = -0.1791$ with returns, $r = +0.5029$ with volume ratios), `Volatility_Ratio_21d`, and volume features. `HL_Spread` is a feature the paper explicitly credits for Regime 0 vs. Regime 2 separation in Section 4.2 / 4.4 and Fig. 4.
+
+### **2. Redundancy-Aware Feature Set (Step 2)**
+Replaced naive selection with a non-redundant 8-feature set matching the paper's narrative parity:
+`['HL_Spread', 'OC_Spread', 'Log_Return_1d', 'ATR_21d', 'Velocity', 'Acceleration', 'Volatility_Ratio_21d', 'Delta_Volume']`
+
+### **3. Recalibrated Paper Fig. 3 Target Analysis (Step 3)**
+* **Target Recalibration**: In the TMLR paper (Fig. 3), bullish states are *uniformly distributed* across all 3 regimes (~6.3%–7.3% each). The paper's target is **not** a 3-way bull/bear/neutral split—the primary separation is **bearish state concentration in one regime** against a backdrop of neutral states.
+* **Out-of-Sample Performance**:
+  * **Mean Out-of-Sample Directional Accuracy (8 Windows)**: **`53.36%`** (Min 44.44%, Max 58.33%, Binomial $p = 0.0814$, not statistically distinguishable from random guessing).
+  * **Mean Out-of-Sample Sharpe Ratio (8 Windows)**: **`+0.8740`** (matching market buy-and-hold `+0.9388`).
+
+### **Key Takeaway**:
+Replacing redundant same-day return features with `HL_Spread`, `Volatility_Ratio_21d`, and `Delta_Volume` restores feature diversity and aligns the input space with the paper's narrative. However, out-of-sample forecasting hit rate remains bounded at **53.36%**, confirming that KASPER's architectural interpretability and its directional forecasting skill are distinct properties: the network provides structural interpretability, while financial return predictability remains noise-dominated under strict temporal separation.
