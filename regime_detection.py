@@ -256,6 +256,12 @@ def contrastive_loss(z: torch.Tensor, target: torch.Tensor, margin: float = 1.0)
     """
     Contrastive loss with both attractive and repulsive terms (Eq. 18).
 
+    Fidelity Note (Eq. 18 Deviation):
+    The paper's Eq. 18 specifies a hard binary indicator y_ij in {0, 1}.
+    When target is a soft probability matrix p (batch, n_regimes), this implementation
+    uses continuous soft similarity Y = P P^T in [0, 1] to provide smooth, continuous
+    gradients to both latent embeddings z and routing probabilities p, preventing early router collapse.
+
     Attractive: penalize large distance for same-regime pairs → compacts clusters.
     Repulsive:  penalize distance < margin for diff-regime pairs → pushes clusters apart.
 

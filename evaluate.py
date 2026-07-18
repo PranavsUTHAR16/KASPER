@@ -348,15 +348,47 @@ def evaluate_model(dataset_type="test", unpruned=False):
     median_conf = float(np.median(max_probs))
     print(f" - Regime Assignment Confidence (max prob): Mean = {mean_conf:.4f}, Median = {median_conf:.4f}")
 
-    # 6. Inverse-scale predictions back to the physical return scale
-    y_hat_unscaled = y_scaler.inverse_transform(y_hat_scaled.reshape(-1, 1)).flatten()
+    # 6. Physical Return Scale & Naive Baselines Audit
+    # Target returns y_data are raw daily percentage returns (unscaled)
+    y_hat_unscaled = y_hat_scaled
+    actual_returns = y_data
+
+    print("\n" + "=" * 90)
+    print(f"NAIVE BASELINES & MODEL COMPARISON AUDIT ({dataset_type.upper()} SET)")
+    print("=" * 90)
+
+    b_long_pos = np.ones_like(actual_returns)
+    b_short_pos = -np.ones_like(actual_returns)
+    b_zero_pred = np.zeros_like(actual_returns)
+    b_train_mean_pred = np.full_like(actual_returns, y_train.mean())
+
+    k_pos = np.where(y_hat_unscaled > 0.0, 1.0, -1.0)
+    k_pos[y_hat_unscaled == 0.0] = 1.0
+
+    baselines_map = {
+        "Always-Long Baseline": (b_long_pos, b_train_mean_pred),
+        "Always-Short Baseline": (b_short_pos, -b_train_mean_pred),
+        "Zero-Predictor Baseline": (b_long_pos, b_zero_pred),
+        "Train-Mean Baseline": (b_long_pos, b_train_mean_pred),
+        "KASPER Model": (k_pos, y_hat_unscaled)
+    }
+
+    print(f"{'Model / Baseline':26s} | {'Dir Acc (%)':12s} | {'Cum Return (%)':15s} | {'Sharpe':10s} | {'R^2':10s} | {'MSE':10s}")
+    print("-" * 90)
+    for b_name, (b_pos, b_yh) in baselines_map.items():
+        b_strat_ret = b_pos * actual_returns
+        b_acc = (np.sign(b_pos) == np.sign(actual_returns)).mean() * 100.0
+        b_cum = (np.prod(1.0 + b_strat_ret) - 1.0) * 100.0
+        b_std = np.std(b_strat_ret)
+        b_sh = (np.mean(b_strat_ret) / (b_std + 1e-8)) * np.sqrt(252.0) if b_std > 0 else 0.0
+        b_r2 = r2_score(actual_returns, b_yh) if np.std(b_yh) > 0 else 0.0
+        b_mse = mean_squared_error(actual_returns, b_yh)
+        print(f"{b_name:26s} | {b_acc:11.2f}% | {b_cum:14.2f}% | {b_sh:10.4f} | {b_r2:10.4f} | {b_mse:10.6f}")
+    print("=" * 90)
 
     # 7. Trading Strategy Simulation
-    # Positions: 1 (Long) if predicted return is positive, else -1 (Short)
     positions = np.where(y_hat_unscaled > 0.0, 1.0, -1.0)
-    
-    # Realized returns = position * actual_return
-    strategy_returns = positions * y_data
+    strategy_returns = positions * actual_returns
 
     # 8. Calculate Financial/ML Metrics and Plot
     calculate_financial_metrics(strategy_returns, y_data, y_hat_unscaled, active_regimes, is_dummy=False, dataset_type=dataset_type)

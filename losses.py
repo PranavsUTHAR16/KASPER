@@ -43,10 +43,14 @@ import torch.nn.functional as F
 from regime_detection import RegimeDetectionLayer, contrastive_loss
 from regime_forecasting import RegimeAdaptiveForecastingLayer
 
+# Hyperparameter Note (Collapse Recovery vs Table 1):
+# Table 1 specifies LAMBDA_CONTRASTIVE = 0.01 and LAMBDA_BALANCE = 0.05.
+# Elevated values (e.g. lambda_c = 0.50, lambda_b = 0.50) are used in training loops
+# as collapse-recovery weights to prevent Huber loss gradients from squashing router logits.
 LAMBDA_SPARSITY = 0.001     # Table 1: L1 parameter sparsity penalty weight
-LAMBDA_CONTRASTIVE = 0.01   # Table 1: contrastive loss weight
+LAMBDA_CONTRASTIVE = 0.01   # Table 1 default: contrastive loss weight
 LAMBDA_ORTHOGONAL = 0.01    # Table 1: orthogonality regularization weight
-LAMBDA_BALANCE = 0.05       # Table 1: regime balance penalty weight
+LAMBDA_BALANCE = 0.05       # Table 1 default: regime balance penalty weight
 
 
 def l1_sparsity(*modules: torch.nn.Module) -> torch.Tensor:

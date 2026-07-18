@@ -40,15 +40,10 @@ def run_regime_breakdown(dataset_type="test"):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 1. Fit scaler on y_train to recover actual physical return scale
-    y_train = np.load(train_y_path)
-    y_scaler = StandardScaler()
-    y_scaler.fit(y_train.reshape(-1, 1))
-
-    # 2. Load evaluation dataset
+    # 2. Load evaluation dataset (y_data is raw percentage returns)
     X_data = np.load(x_path)
     y_data = np.load(y_path)
-    actual_returns = y_scaler.inverse_transform(y_data.reshape(-1, 1)).flatten()
+    actual_returns = y_data
 
     N = len(actual_returns)
     print(f"Loaded {dataset_type} dataset: N = {N} samples.")
