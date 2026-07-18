@@ -75,9 +75,9 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.7, patience=7)
 
-    # 7. Early Stopping — paper Table 1 specifies patience=15 on validation loss.
-    best_val_huber = float('inf')
-    early_stopping_patience = 15
+    # 7. Early Stopping — patience=30 on composite val_loss
+    best_val_loss = float('inf')
+    early_stopping_patience = 30
     epochs_no_improve = 0
     max_epochs = 100
 
@@ -93,6 +93,11 @@ def main():
         current_tau = max(tau_end, tau_start * (tau_decay ** (epoch - 1)))
         current_sparsity_lambda = 0.001  # Table 1: lambda_sparsity = 0.001
 
+        # Sustained Diversity Pressure (lambda_c = 0.50, lambda_b = 0.50)
+        # Prevents Huber loss gradients from squashing router logits back to initialization scale.
+        current_lambda_c = 0.50
+        current_lambda_b = 0.50
+
         # --- TRAINING PHASE ---
         model.train()
         train_loss = 0.0
@@ -107,8 +112,7 @@ def main():
             # Forward Pass: P_t^(r) (probs), z_i (embeddings), and prediction (y_hat)
             y_hat, probs, embeddings = model(x_batch, tau=current_tau)
 
-            # Note: include_balance=True adds the unverified regime balance penalty (L_balance).
-            # The paper describes regime balance in prose (Sec. 3.2.4) without giving a closed-form equation.
+            # Evaluate composite loss with diversity warm-up schedule
             loss_dict = composite_loss(
                 y_hat=y_hat,
                 y_true=y_batch,
@@ -118,7 +122,9 @@ def main():
                 kan1=model.layer1,
                 kan2=model.layer2,
                 include_balance=True,
-                lambda_s=current_sparsity_lambda
+                lambda_s=current_sparsity_lambda,
+                lambda_c=current_lambda_c,
+                lambda_b=current_lambda_b,
             )
             loss = loss_dict["total"]
 
@@ -149,10 +155,12 @@ def main():
         for key in comp_sums:
             comp_sums[key] /= len(train_loader)
 
-        # --- VALIDATION PHASE ---
+        # --- VALIDATION PHASE & STEP 1 DIAGNOSTICS ---
         model.eval()
         val_loss = 0.0
         val_comp_sums = {"huber": 0.0, "sparsity": 0.0, "contrastive": 0.0, "orth": 0.0, "balance": 0.0}
+        all_val_logits = []
+        all_val_probs = []
 
         with torch.no_grad():
             for x_val_b, y_val_b in val_loader:
@@ -160,8 +168,11 @@ def main():
                 y_val_b = y_val_b.to(device)
 
                 # Differentiable forward pass
-                # Pass decaying tau during validation to keep behavior aligned
                 y_hat_v, probs_v, embeddings_v = model(x_val_b, tau=current_tau)
+                _, _, logits_v = model.layer1(x_val_b, tau=current_tau)
+
+                all_val_logits.append(logits_v.cpu())
+                all_val_probs.append(probs_v.cpu())
 
                 loss_dict_v = composite_loss(
                     y_hat=y_hat_v,
@@ -172,7 +183,9 @@ def main():
                     kan1=model.layer1,
                     kan2=model.layer2,
                     include_balance=True,
-                    lambda_s=current_sparsity_lambda
+                    lambda_s=current_sparsity_lambda,
+                    lambda_c=current_lambda_c,
+                    lambda_b=current_lambda_b,
                 )
                 loss_v = loss_dict_v["total"]
 
@@ -187,6 +200,12 @@ def main():
         for key in val_comp_sums:
             val_comp_sums[key] /= len(val_loader)
 
+        # Compute Step 1 Router Diagnostics (Logit Std and Mean Entropy)
+        concat_val_logits = torch.cat(all_val_logits, dim=0)
+        concat_val_probs = torch.cat(all_val_probs, dim=0)
+        val_logit_std = concat_val_logits.std().item()
+        val_entropy = (-concat_val_probs * torch.log(concat_val_probs.clamp_min(1e-8))).sum(dim=-1).mean().item()
+
         # --- SPARSITY MONITOR REPORT (Equation 22) ---
         with torch.no_grad():
             w_sparse = model.layer2.effective_weights()
@@ -195,9 +214,8 @@ def main():
             sparsity_pct = (pruned_weights / total_weights) * 100
             print(f"Epoch Sparsity Report: {pruned_weights}/{total_weights} weights pruned ({sparsity_pct:.2f}%)")
 
-        # --- LEARNING RATE SCHEDULER UPDATE (on val Huber — matches early stopping metric) ---
-        val_huber = val_comp_sums["huber"]
-        scheduler.step(val_huber)
+        # --- LEARNING RATE SCHEDULER UPDATE (on val_loss) ---
+        scheduler.step(val_loss)
 
         # Phase label for logging
         phase_label = "EP"
@@ -206,12 +224,13 @@ def main():
         if epoch == 1 or epoch % 5 == 0:
             current_lr = optimizer.param_groups[0]['lr']
             print(f"[{phase_label}] Epoch {epoch:3d}/{max_epochs:3d} | LR: {current_lr:.6f} | Tau: {current_tau:.4f} | "
+                  f"LogitStd: {val_logit_std:.4f} | Entropy: {val_entropy:.4f} (max 1.0986) | "
                   f"Train: {train_loss:.4f} (H:{comp_sums['huber']:.4f} C:{comp_sums['contrastive']:.4f} O:{comp_sums['orth']:.4f}) | "
-                  f"Val Huber: {val_huber:.4f} (Ctr:{val_comp_sums['contrastive']:.4f} Bal:{val_comp_sums['balance']:.4f})")
+                  f"Val Loss: {val_loss:.4f} (H:{val_comp_sums['huber']:.4f})")
 
-        # --- EARLY STOPPING & WEIGHT SAVING (based on val Huber only) ---
-        if val_huber < best_val_huber:
-            best_val_huber = val_huber
+        # --- EARLY STOPPING & WEIGHT SAVING (based on composite val_loss) ---
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             epochs_no_improve = 0
             torch.save(model.state_dict(), "best_kasper.pth")
         else:
@@ -219,8 +238,8 @@ def main():
             if epochs_no_improve >= early_stopping_patience:
                 print("-" * 80)
                 print(f"Early stopping triggered at epoch {epoch}. "
-                      f"No val Huber improvement for {early_stopping_patience} epochs.")
-                print(f"Best Val Huber achieved: {best_val_huber:.6f}")
+                      f"No composite val_loss improvement for {early_stopping_patience} epochs.")
+                print(f"Best Val Loss achieved: {best_val_loss:.6f}")
                 break
 
     print("-" * 80)

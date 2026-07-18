@@ -193,6 +193,29 @@ class RegimeDetectionLayer(nn.Module):
             block(hidden_dim, hidden_dim),
         )
         self.to_logits = nn.Linear(hidden_dim, n_regimes)
+        nn.init.orthogonal_(self.to_logits.weight, gain=1.0)
+        nn.init.zeros_(self.to_logits.bias)
+
+    def init_router_centroids(self, X_train: torch.Tensor):
+        """
+        Seeds Layer 1 router weights using K-Means centroids on initial embeddings z.
+        Ensures initial logits compute projection onto separated cluster centers rather
+        than random uncommitted initialization scale.
+        """
+        from sklearn.cluster import KMeans
+        self.eval()
+        with torch.no_grad():
+            embedded_feats = self.spline(X_train)
+            z = self.embed(embedded_feats).cpu().numpy()
+        
+        kmeans = KMeans(n_clusters=self.n_regimes, random_state=42, n_init=10).fit(z)
+        centroids = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32, device=self.to_logits.weight.device)
+        
+        # Scale centroids so projection logits have clear separation (gain=3.0)
+        centroids_norm = F.normalize(centroids, p=2, dim=1) * 3.0
+        self.to_logits.weight.data.copy_(centroids_norm)
+        self.to_logits.bias.data.zero_()
+        self.train()
 
     def forward(self, phi_t: torch.Tensor, tau: float = 1.0, hard: bool = False, deterministic: bool = False):
         """

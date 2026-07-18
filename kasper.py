@@ -56,9 +56,11 @@ class KASPER(nn.Module):
         Args:
             X_train (torch.Tensor): Training data sequence, shape (B, num_inputs).
         """
-        # Fit Layer 1 splines
+        # Fit Layer 1 splines & router centroids
         for j, spline in enumerate(self.layer1.spline.splines):
             spline.fit_knots(X_train[:, j])
+        self.layer1.init_router_centroids(X_train)
+
         # Fit Layer 2 splines
         for r in range(self.layer2.n_regimes):
             for j, spline in enumerate(self.layer2.splines[r]):

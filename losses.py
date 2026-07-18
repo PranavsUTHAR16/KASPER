@@ -61,13 +61,14 @@ def l1_sparsity(*modules: torch.nn.Module) -> torch.Tensor:
 
 def unverified_regime_balance_penalty(p: torch.Tensor) -> torch.Tensor:
     """
-    Penalize deviation from uniform distribution using MSE (softer than KL).
+    Penalize deviation of batch-mean regime probabilities from uniform distribution
+    using KL-divergence (standard mixture-of-experts load balancing penalty).
 
     p: (batch, n_regimes) soft regime probabilities from KAN 1.
     """
-    mean_probs = p.mean(dim=0)
-    target_probs = torch.ones_like(mean_probs) / p.shape[1]
-    return F.mse_loss(mean_probs, target_probs)
+    mean_probs = p.mean(dim=0).clamp_min(1e-8)
+    uniform = torch.full_like(mean_probs, 1.0 / p.shape[1])
+    return (mean_probs * torch.log(mean_probs / uniform)).sum()
 
 
 def composite_loss(
@@ -80,20 +81,11 @@ def composite_loss(
     kan2: RegimeAdaptiveForecastingLayer,
     include_balance: bool = False,
     lambda_s: float = 0.001,
+    lambda_c: float = 0.01,
+    lambda_b: float = 0.05,
 ) -> dict:
     """
     Eq. 23. Returns every term individually (for logging) plus "total".
-
-    Args:
-        y_hat, y_true: (batch,) predicted vs. true returns.
-        z:             (batch, hidden_dim) KAN 1 embedding, pre-softmax.
-        p:             (batch, n_regimes) KAN 1 soft regime probabilities.
-        regime_ids:    (batch,) hard regime assignment, e.g. p.argmax(-1).
-        kan1, kan2:    the two KASPER layers, needed for their parameters
-                        (sparsity) and orthogonality_loss().
-        include_balance: if True, adds the explicitly-unverified L_balance
-                        term on top of the four paper-verified ones.
-        lambda_s:      dynamic weight for L1 parameter sparsity penalty.
     """
     l_huber = F.huber_loss(y_hat, y_true)
     # Eq. 23: L1 parameter sparsity term sums |p| over all trainable parameters Theta in both kan1 and kan2
@@ -107,7 +99,7 @@ def composite_loss(
     total = (
         1.0 * l_huber
         + lambda_s * l_sparsity
-        + LAMBDA_CONTRASTIVE * l_contrastive
+        + lambda_c * l_contrastive
         + LAMBDA_ORTHOGONAL * l_orth
     )
 
@@ -120,7 +112,7 @@ def composite_loss(
 
     if include_balance:
         l_balance = unverified_regime_balance_penalty(p)
-        total = total + LAMBDA_BALANCE * l_balance
+        total = total + lambda_b * l_balance
         terms["balance_unverified"] = l_balance
 
     terms["total"] = total
