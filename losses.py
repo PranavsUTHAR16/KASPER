@@ -98,7 +98,8 @@ def composite_loss(
     l_huber = F.huber_loss(y_hat, y_true)
     # Eq. 23: L1 parameter sparsity term sums |p| over all trainable parameters Theta in both kan1 and kan2
     l_sparsity = l1_sparsity(kan1, kan2)
-    l_contrastive = contrastive_loss(z, regime_ids)
+    # Differentiable contrastive loss passing soft regime probabilities p
+    l_contrastive = contrastive_loss(z, p)
     # Eq. 19: orthogonality on kan2.weights (W ∈ R^{R×F}, w^(r)_j = forecast weight for feature j in regime r)
     l_orth = kan2.orthogonality_loss()
 

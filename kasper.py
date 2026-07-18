@@ -64,12 +64,13 @@ class KASPER(nn.Module):
             for j, spline in enumerate(self.layer2.splines[r]):
                 spline.fit_knots(X_train[:, j])
 
-    def forward(self, phi_t, tau=1.0, hard=False):
+    def forward(self, phi_t, tau=1.0, hard=False, deterministic=False):
         """
         Args:
             phi_t (torch.Tensor): Input features tensor, shape (B, num_inputs).
-            tau (float): Temperature for Gumbel-Softmax routing.
+            tau (float): Temperature for Gumbel-Softmax / Softmax routing.
             hard (bool): If True, routes using hard one-hot assignments.
+            deterministic (bool): If True, use deterministic Softmax without Gumbel noise (inference mode).
             
         Returns:
             final_forecast (torch.Tensor): Output forecast values, shape (B, 1) or (B,).
@@ -77,7 +78,7 @@ class KASPER(nn.Module):
             embeddings (torch.Tensor): Stable latent representation, shape (B, hidden_dim).
         """
         # 1. Evaluate Layer 1 to get probabilities and latent representations
-        embeddings, probs, logits = self.layer1(phi_t, tau=tau, hard=hard)
+        embeddings, probs, logits = self.layer1(phi_t, tau=tau, hard=hard, deterministic=deterministic)
 
         # 2. Evaluate Layer 2 to get final predictions guided by the probabilities & attention.
         #    Layer 2 returns: (y_hat, forecast_per_regime, phi_per_regime)

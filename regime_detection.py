@@ -194,16 +194,17 @@ class RegimeDetectionLayer(nn.Module):
         )
         self.to_logits = nn.Linear(hidden_dim, n_regimes)
 
-    def forward(self, phi_t: torch.Tensor, tau: float = 1.0, hard: bool = False):
+    def forward(self, phi_t: torch.Tensor, tau: float = 1.0, hard: bool = False, deterministic: bool = False):
         """
         Args:
-            phi_t: (batch, n_features) input feature matrix.
-            tau:   Gumbel-Softmax temperature (low tau -> near one-hot).
-            hard:  if True, straight-through hard sampling.
+            phi_t:         (batch, n_features) input feature matrix.
+            tau:           Gumbel-Softmax / Softmax temperature (low tau -> near one-hot).
+            hard:          if True, straight-through hard sampling.
+            deterministic: if True, use deterministic F.softmax(logits / tau) without Gumbel noise (inference mode).
 
         Returns:
             z:      (batch, hidden_dim)  embedding used by the contrastive loss.
-            p:      (batch, n_regimes)   soft regime probabilities, consumed by KAN 2.
+            p:      (batch, n_regimes)   soft/deterministic regime probabilities, consumed by KAN 2.
             logits: (batch, n_regimes)   raw regime logits, for diagnostics.
         """
         # Step 1: Spline + per-feature projection → concatenated embedding
@@ -213,11 +214,14 @@ class RegimeDetectionLayer(nn.Module):
         # Step 2: Global MLP across all stacked feature embeddings
         z = self.embed(embedded_feats)                              # (batch, hidden_dim)
 
-        # Step 3: Route to regime logits → Gumbel-Softmax
+        # Step 3: Route to regime logits → Gumbel-Softmax or Deterministic Softmax
         logits = self.to_logits(z)                                  # f_r(Phi_t)
-        # Fidelity Note (Eq. 17): Paper writes exp(f_r(Phi_t + g_r)/tau) with noise inside spline input.
-        # Standard F.gumbel_softmax is used here on logits for numerical stability and gradient reliability.
-        p = F.gumbel_softmax(logits, tau=tau, hard=hard, dim=-1)    # Eq. 17
+        if deterministic:
+            p = F.softmax(logits / tau, dim=-1)
+        else:
+            # Fidelity Note (Eq. 17): Paper writes exp(f_r(Phi_t + g_r)/tau) with noise inside spline input.
+            # Standard F.gumbel_softmax is used here on logits for numerical stability and gradient reliability during training.
+            p = F.gumbel_softmax(logits, tau=tau, hard=hard, dim=-1)    # Eq. 17
         return z, p, logits
 
     # NOTE: orthogonality_loss (Eq. 19) is a method of RegimeAdaptiveForecastingLayer.
@@ -225,32 +229,35 @@ class RegimeDetectionLayer(nn.Module):
     # — that is self.weights in Layer 2, not the routing logits here.
 
 
-def contrastive_loss(z: torch.Tensor, regime_ids: torch.Tensor, margin: float = 1.0) -> torch.Tensor:
+def contrastive_loss(z: torch.Tensor, target: torch.Tensor, margin: float = 1.0) -> torch.Tensor:
     """
     Contrastive loss with both attractive and repulsive terms (Eq. 18).
 
-    Attractive: penalize large sq_dist for same-regime pairs → compacts clusters.
-    Repulsive:  penalize small sq_dist for diff-regime pairs → pushes clusters apart.
-
-    Without repulsion, representation collapse is mathematically guaranteed (distances -> 0),
-    which makes the routing unstable.
+    Attractive: penalize large distance for same-regime pairs → compacts clusters.
+    Repulsive:  penalize distance < margin for diff-regime pairs → pushes clusters apart.
 
     Args:
-        z:          (batch, hidden_dim) pre-softmax embeddings from KAN 1.
-        regime_ids: (batch,) hard regime assignment, e.g. p.argmax(-1).
-        margin:     minimum sq_dist required between different-regime pairs.
+        z:      (batch, hidden_dim) pre-softmax embeddings from KAN 1.
+        target: (batch, n_regimes) soft regime probabilities p OR (batch,) hard regime IDs.
+        margin: minimum distance required between different-regime pairs.
     """
     diff = z.unsqueeze(1) - z.unsqueeze(0)          # (B, B, D)
-    sq_dist = (diff ** 2).sum(-1)                    # (B, B)
+    dist = torch.sqrt((diff ** 2).sum(-1) + 1e-8)   # (B, B) Euclidean distance
 
-    same_regime = (regime_ids.unsqueeze(1) == regime_ids.unsqueeze(0)).float()
-    diff_regime = 1.0 - same_regime
+    if target.dim() == 2:
+        # Soft pairwise regime similarity y_ij = p_i @ p_j^T in [0, 1] (differentiable wrt p)
+        same_regime = target @ target.T             # (B, B)
+        diff_regime = 1.0 - same_regime
+    else:
+        same_regime = (target.unsqueeze(1) == target.unsqueeze(0)).float()
+        diff_regime = 1.0 - same_regime
+
     mask = 1.0 - torch.eye(z.shape[0], device=z.device)  # exclude self-pairs
 
-    attractive = (sq_dist * same_regime * mask).sum()
-    repulsive  = (F.relu(margin - sq_dist) * diff_regime * mask).sum()
+    attractive = ((dist ** 2) * same_regime * mask).sum() / (same_regime * mask).sum().clamp_min(1.0)
+    repulsive  = (F.relu(margin - dist) * diff_regime * mask).sum() / (diff_regime * mask).sum().clamp_min(1.0)
 
-    return (attractive + repulsive) / mask.sum().clamp_min(1.0)
+    return attractive + repulsive
 
 
 if __name__ == "__main__":

@@ -322,16 +322,16 @@ def evaluate_model(dataset_type="test", unpruned=False):
         model.layer2.theta_raw.data.fill_(-100.0)
     model.eval()
 
-    # 5. Run Model Inference
-    print(f"\nRunning model inference on {dataset_type} set...")
+    # 5. Run Model Inference (Deterministic mode with annealed tau=0.3)
+    print(f"\nRunning model inference on {dataset_type} set (deterministic, tau=0.3)...")
     all_y_hat = []
     all_probs = []
     
     with torch.no_grad():
         for x_batch, _ in loader:
             x_batch = x_batch.to(device)
-            # Eval pass: returns predictions, probs, embeddings
-            y_hat_b, probs_b, _ = model(x_batch, tau=1.0)
+            # Eval pass: deterministic softmax routing with annealed tau=0.3 (no Gumbel noise during inference)
+            y_hat_b, probs_b, _ = model(x_batch, tau=0.3, deterministic=True)
             all_y_hat.append(y_hat_b.cpu().numpy())
             all_probs.append(probs_b.cpu().numpy())
 
@@ -341,6 +341,12 @@ def evaluate_model(dataset_type="test", unpruned=False):
 
     # Compute hard regime assignments (1D array)
     active_regimes = np.argmax(probs_np, axis=1)
+
+    # Compute regime assignment confidence distribution (max prob)
+    max_probs = probs_np.max(axis=1)
+    mean_conf = float(np.mean(max_probs))
+    median_conf = float(np.median(max_probs))
+    print(f" - Regime Assignment Confidence (max prob): Mean = {mean_conf:.4f}, Median = {median_conf:.4f}")
 
     # 6. Inverse-scale predictions back to the physical return scale
     y_hat_unscaled = y_scaler.inverse_transform(y_hat_scaled.reshape(-1, 1)).flatten()

@@ -152,9 +152,9 @@ def main():
     model.load_state_dict(torch.load(weights_path, map_location=device))
     model.eval()
 
-    print("\nClassifying test set regimes using Layer 1...")
+    print("\nClassifying test set regimes using Layer 1 (deterministic, tau=0.3)...")
     with torch.no_grad():
-        _, probs, _ = model.layer1(X_test_tensor.to(device), tau=1.0)
+        _, probs, _ = model.layer1(X_test_tensor.to(device), tau=0.3, deterministic=True)
     assigned_regimes = torch.argmax(probs, dim=-1).cpu()
 
     for r in range(num_regimes):
