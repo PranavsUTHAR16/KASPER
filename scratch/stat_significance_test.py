@@ -44,12 +44,18 @@ def run_significance_tests():
     X_test = np.load(test_x_path)
     y_test = np.load(test_y_path)
 
-    y_mean = y_train.mean()
-    y_std = y_train.std()
-
     model = KASPER(num_inputs=X_train.shape[1], hidden_dim=64, num_regimes=3, num_knots=8).to(device)
     model.fit_knots(torch.tensor(X_train, dtype=torch.float32).to(device))
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+
+    checkpoint = torch.load(weights_path, map_location=device)
+    if isinstance(checkpoint, dict) and "model" in checkpoint:
+        model.load_state_dict(checkpoint["model"])
+        y_mean = float(checkpoint.get("y_mean", y_train.mean()))
+        y_std = float(checkpoint.get("y_std", y_train.std()))
+    else:
+        model.load_state_dict(checkpoint)
+        y_mean = float(y_train.mean())
+        y_std = float(y_train.std())
     model.eval()
 
     def evaluate_split(label, X_data, y_actual):
@@ -58,7 +64,8 @@ def run_significance_tests():
             y_hat_norm, probs, _ = model(X_t, tau=0.3, deterministic=True)
 
         y_h_norm = y_hat_norm.cpu().numpy()
-        positions = np.where(y_h_norm > y_h_norm.mean(), 1.0, -1.0)
+        y_hat_unscaled = y_h_norm * y_std + y_mean
+        positions = np.where(y_hat_unscaled > 0.0, 1.0, -1.0)
         strat_returns = positions * y_actual
 
         n_samples = len(y_actual)

@@ -315,8 +315,17 @@ def evaluate_model(dataset_type="test", unpruned=False):
         print("Warning: Training features not found. Fitting knots.")
         model.fit_knots(X_tensor.to(device))
 
-    print(f"Loading weights from '{weights_path}'...")
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+    print(f"Loading weights and normalization parameters from '{weights_path}'...")
+    checkpoint = torch.load(weights_path, map_location=device)
+    if isinstance(checkpoint, dict) and "model" in checkpoint:
+        model.load_state_dict(checkpoint["model"])
+        y_mean = float(checkpoint.get("y_mean", y_train.mean()))
+        y_std = float(checkpoint.get("y_std", y_train.std()))
+    else:
+        model.load_state_dict(checkpoint)
+        y_mean = float(y_train.mean())
+        y_std = float(y_train.std())
+
     if unpruned:
         print("  [Ablation mode: disabling sparsity thresholding via theta_raw fill]")
         model.layer2.theta_raw.data.fill_(-100.0)
@@ -349,8 +358,8 @@ def evaluate_model(dataset_type="test", unpruned=False):
     print(f" - Regime Assignment Confidence (max prob): Mean = {mean_conf:.4f}, Median = {median_conf:.4f}")
 
     # 6. Physical Return Scale & Naive Baselines Audit
-    # Target returns y_data are raw daily percentage returns (unscaled)
-    y_hat_unscaled = y_hat_scaled
+    # Unscale model predictions: y_hat_raw = y_hat_norm * y_std + y_mean
+    y_hat_unscaled = y_hat_scaled * y_std + y_mean
     actual_returns = y_data
 
     print("\n" + "=" * 90)

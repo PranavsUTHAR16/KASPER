@@ -86,7 +86,11 @@ def run_rolling_walk_forward():
             y_hat_ev_norm, probs_ev, _ = model(X_ev_t, tau=0.3, deterministic=True)
 
         y_h_ev_norm = y_hat_ev_norm.cpu().numpy()
-        positions = np.where(y_h_ev_norm > y_h_ev_norm.mean(), 1.0, -1.0)
+        # Documented Threshold Rule (matching evaluate.py):
+        # Unscale model predictions: y_h_ev_unscaled = y_h_ev_norm * y_tr_std + y_tr_mean
+        # Trading position: Long if y_h_ev_unscaled > 0.0, else Short (absolute return direction)
+        y_h_ev_unscaled = y_h_ev_norm * y_tr_std + y_tr_mean
+        positions = np.where(y_h_ev_unscaled > 0.0, 1.0, -1.0)
         strat_returns = positions * y_ev
         market_returns = y_ev
 

@@ -36,7 +36,7 @@ def get_regime_forecasts(model, phi_t):
     return forecast_per_regime
 
 
-def estimate_shapley(model, x, num_permutations=50):
+def estimate_shapley(model: nn.Module, x: torch.Tensor, num_permutations: int = 50, y_std: float = 1.0) -> torch.Tensor:
     """
     Computes permutation-based Monte Carlo Shapley values for all inputs of a single sample (Eq. 24, 25).
     Evaluates the progressive feature subsets in parallel for speed.
@@ -67,8 +67,9 @@ def estimate_shapley(model, x, num_permutations=50):
         # Evaluate model forecasts for all regimes: shape (D + 1, num_regimes)
         y_hat = get_regime_forecasts(model, batch_inputs)
         
-        # Compute marginal contributions (difference between step k and k-1)
-        diffs = y_hat[1:] - y_hat[:-1]
+        # Compute marginal contributions: (y_hat[1:] - y_hat[:-1]) * y_std
+        # Note: y_mean cancels out in difference ((y1*y_std + y_mean) - (y0*y_std + y_mean) = (y1-y0)*y_std).
+        diffs = (y_hat[1:] - y_hat[:-1]) * y_std
         
         # Accumulate diffs into the corresponding permutation indices
         shapley_values.scatter_add_(1, perm.unsqueeze(0).expand(model.layer2.n_regimes, -1), diffs.t())
@@ -148,8 +149,15 @@ def main():
     else:
         model.fit_knots(X_test_tensor.to(device))
 
-    print(f"Loading weights from '{weights_path}'...")
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+    print(f"Loading weights and normalization parameters from '{weights_path}'...")
+    checkpoint = torch.load(weights_path, map_location=device)
+    if isinstance(checkpoint, dict) and "model" in checkpoint:
+        model.load_state_dict(checkpoint["model"])
+        y_std = float(checkpoint.get("y_std", 0.013237))
+    else:
+        model.load_state_dict(checkpoint)
+        y_std = 0.013237
+
     model.eval()
 
     print("\nClassifying test set regimes using Layer 1 (deterministic, tau=0.3)...")
@@ -168,7 +176,7 @@ def main():
     
     for i in range(num_samples_to_process):
         x_sample = X_test_tensor[i].to(device)
-        shapley = estimate_shapley(model, x_sample, num_permutations=50)
+        shapley = estimate_shapley(model, x_sample, num_permutations=50, y_std=y_std)
         all_shapley.append(shapley.cpu())
 
     shapley_tensor = torch.stack(all_shapley, dim=0)

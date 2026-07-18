@@ -285,7 +285,12 @@ def main():
             if is_valid_checkpoint:
                 best_val_huber = val_huber
                 epochs_no_improve = 0
-                torch.save(model.state_dict(), "best_kasper.pth")
+                checkpoint_payload = {
+                    "model": model.state_dict(),
+                    "y_mean": y_mean,
+                    "y_std": y_std
+                }
+                torch.save(checkpoint_payload, "best_kasper.pth")
                 print(f"  --> Saved new best checkpoint at Epoch {epoch:3d} (Val Huber: {val_huber:.6f}, Pred Std: {val_pred_std:.6e}, Max Corr: {max_feat_corr:.4f})")
         else:
             epochs_no_improve += 1
