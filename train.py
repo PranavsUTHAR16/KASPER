@@ -46,8 +46,20 @@ def main():
     y_val_tensor = torch.tensor(y_val_scaled, dtype=torch.float32)
 
     # Create DataLoaders
-    train_loader = DataLoader(TensorDataset(X_tensor, y_tensor), batch_size=32, shuffle=True)
-    val_loader = DataLoader(TensorDataset(X_val_tensor, y_val_tensor), batch_size=64, shuffle=False)
+    # Compute training target normalization parameters (so Huber loss gradients balance L1 parameter sparsity)
+    y_mean = float(y_train.mean())
+    y_std = float(y_train.std())
+    print(f"Training target normalization: mean = {y_mean:+.6f}, std = {y_std:.6f}")
+
+    # Standardized target tensors for gradient balance
+    y_train_norm = (y_train - y_mean) / y_std
+    y_val_norm = (y_val - y_mean) / y_std
+
+    train_dataset = TensorDataset(X_tensor, torch.tensor(y_train_norm, dtype=torch.float32))
+    val_dataset = TensorDataset(X_val_tensor, torch.tensor(y_val_norm, dtype=torch.float32))
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
     # 4. Instantiate Model & Fit Knots
     num_inputs = X_train.shape[1]
@@ -75,8 +87,8 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.7, patience=7)
 
-    # 7. Early Stopping — patience=30 on composite val_loss
-    best_val_loss = float('inf')
+    # 7. Early Stopping — patience=30 on validation Huber forecasting loss
+    best_val_huber = float('inf')
     early_stopping_patience = 30
     epochs_no_improve = 0
     max_epochs = 100
@@ -93,10 +105,11 @@ def main():
         current_tau = max(tau_end, tau_start * (tau_decay ** (epoch - 1)))
         current_sparsity_lambda = 0.001  # Table 1: lambda_sparsity = 0.001
 
-        # Sustained Diversity Pressure (lambda_c = 0.50, lambda_b = 0.50)
-        # Prevents Huber loss gradients from squashing router logits back to initialization scale.
-        current_lambda_c = 0.50
-        current_lambda_b = 0.50
+        # Balanced Loss Schedule with Normalized Target Training
+        # lambda_c = 0.05, lambda_b = 0.05 maintains regime separation while allowing
+        # normalized Huber loss gradients to dominate forecast head learning.
+        current_lambda_c = 0.05
+        current_lambda_b = 0.05
 
         # --- TRAINING PHASE ---
         model.train()
@@ -228,18 +241,59 @@ def main():
                   f"Train: {train_loss:.4f} (H:{comp_sums['huber']:.4f} C:{comp_sums['contrastive']:.4f} O:{comp_sums['orth']:.4f}) | "
                   f"Val Loss: {val_loss:.4f} (H:{val_comp_sums['huber']:.4f})")
 
-        # --- EARLY STOPPING & WEIGHT SAVING (based on composite val_loss) ---
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            epochs_no_improve = 0
-            torch.save(model.state_dict(), "best_kasper.pth")
+        # --- AUTOMATED COLLAPSE CHECKS (Step 3) ---
+        # Evaluate validation predictions for collapse assertion
+        all_y_hat_v = []
+        all_x_v = []
+        for x_val_b, y_val_b in val_loader:
+            x_val_b = x_val_b.to(device)
+            with torch.no_grad():
+                y_hat_v_b, _, _ = model(x_val_b, tau=0.3, deterministic=True)
+                all_y_hat_v.append(y_hat_v_b.cpu())
+                all_x_v.append(x_val_b.cpu())
+        val_y_hat_np = torch.cat(all_y_hat_v, dim=0).numpy() * y_std + y_mean
+        val_x_np = torch.cat(all_x_v, dim=0).numpy()
+
+        val_pred_std = val_y_hat_np.std()
+        max_feat_corr = max(
+            abs(np.corrcoef(val_x_np[:, j], val_y_hat_np)[0, 1])
+            if val_pred_std > 1e-12 else 0.0
+            for j in range(val_x_np.shape[1])
+        )
+
+        # --- EARLY STOPPING & WEIGHT SAVING (based on validation Huber forecasting error) ---
+        # Note: Must use val_huber (not composite loss) so L1 parameter decay doesn't trick early stopping.
+        val_huber = val_comp_sums["huber"]
+        if val_huber < best_val_huber:
+            # Step 3 Assertions: Must pass both Router Collapse & Forecast Collapse checks before saving checkpoint
+            is_valid_checkpoint = True
+            if val_entropy >= 1.0:
+                is_valid_checkpoint = False
+                if epoch % 5 == 0:
+                    print(f"  [CHECKPOINT REJECTED] Router entropy = {val_entropy:.4f} >= 1.0 (Router collapsed)")
+
+            if val_pred_std <= 1e-6:
+                is_valid_checkpoint = False
+                if epoch % 5 == 0:
+                    print(f"  [CHECKPOINT REJECTED] Forecast std = {val_pred_std:.6e} <= 1e-6 (Forecast head collapsed)")
+
+            if max_feat_corr <= 0.02:
+                is_valid_checkpoint = False
+                if epoch % 5 == 0:
+                    print(f"  [CHECKPOINT REJECTED] Max feature correlation = {max_feat_corr:.4f} <= 0.02 (No feature conditioning)")
+
+            if is_valid_checkpoint:
+                best_val_huber = val_huber
+                epochs_no_improve = 0
+                torch.save(model.state_dict(), "best_kasper.pth")
+                print(f"  --> Saved new best checkpoint at Epoch {epoch:3d} (Val Huber: {val_huber:.6f}, Pred Std: {val_pred_std:.6e}, Max Corr: {max_feat_corr:.4f})")
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= early_stopping_patience:
                 print("-" * 80)
                 print(f"Early stopping triggered at epoch {epoch}. "
-                      f"No composite val_loss improvement for {early_stopping_patience} epochs.")
-                print(f"Best Val Loss achieved: {best_val_loss:.6f}")
+                      f"No val_huber improvement for {early_stopping_patience} epochs.")
+                print(f"Best Val Huber achieved: {best_val_huber:.6f}")
                 break
 
     print("-" * 80)

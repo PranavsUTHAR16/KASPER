@@ -133,13 +133,11 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
         ])
 
         # w_j^(r): trainable per-feature, per-regime forecast weights (Eq. 20)
-        self.weights = nn.Parameter(torch.randn(n_regimes, n_features) * 0.1)
-        # theta^(r): regime-specific sparsity threshold, kept non-negative via softplus.
-        self.theta_raw = nn.Parameter(torch.full((n_regimes,), -6.0))
+        self.weights = nn.Parameter(torch.randn(n_regimes, n_features) * 0.2)
+        # theta^(r): regime-specific sparsity threshold (Table 1 default ~0.001)
+        self.theta_raw = nn.Parameter(torch.full((n_regimes,), -7.0))
 
         # Fidelity Note (Fig. 2 Caption): KAN-2 Attention-based Aggregation & Final Refinement Head
-        # "produces regime-adaptive forecasts by updating a sparsity mask over spline components
-        # and computing attention-based aggregation before the final refinement."
         self.attn_proj = nn.Linear(n_regimes, n_regimes)
         self.refinement_head = nn.Sequential(
             nn.Linear(1, 16),
@@ -148,7 +146,8 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
         )
 
     def sparsity_threshold(self) -> torch.Tensor:
-        return F.softplus(self.theta_raw)  # (n_regimes,)
+        # Clamp theta_raw upper bound to prevent threshold from trapping weights in ReLU dead zone
+        return F.softplus(self.theta_raw.clamp(max=-4.6))  # softplus(-4.6) ~ 0.01
 
     def effective_weights(self) -> torch.Tensor:
         """w_j^(r) <- ReLU(|w_j^(r)| - theta^(r)), sign preserved   (Eq. 22)"""
@@ -177,15 +176,10 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
                 phi_per_regime[:, r, j] = self.splines[r][j](phi_t[:, j])
 
         forecast_per_regime = (phi_per_regime * w_eff.unsqueeze(0)).sum(-1)  # Eq. 20, (batch, n_regimes)
-        
-        # 1. Attention-based Aggregation (Fig. 2 Caption)
-        attn_logits = self.attn_proj(forecast_per_regime)
-        attn_weights = F.softmax(attn_logits + torch.log(p.clamp_min(1e-8)), dim=-1)
-        y_agg = (forecast_per_regime * attn_weights).sum(-1)  # (batch,)
 
-        # 2. Final Refinement Head with residual connection (Fig. 2 Caption)
-        refinement = self.refinement_head(y_agg.unsqueeze(1)).squeeze(1)
-        y_hat = y_agg + refinement  # (batch,)
+        # Eq. 20 (Section 3.2.3): Primary paper forecast formula — regime-weighted sum:
+        # y_hat_t = sum_{r=1}^R P_t^(r) y_hat_t^(r)
+        y_hat = (forecast_per_regime * p).sum(-1)  # (batch,)
 
         return y_hat, forecast_per_regime, phi_per_regime
 

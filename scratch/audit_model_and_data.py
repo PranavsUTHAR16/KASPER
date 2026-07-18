@@ -54,19 +54,22 @@ def audit_model_and_data():
         print(f"\nError: {weights_path} not found.")
         return
 
-    X_test = np.load(test_x_path)
-    X_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
+    X_eval = np.load(test_x_path)
+    X_eval_tensor = torch.tensor(X_eval, dtype=torch.float32).to(device)
 
-    model = KASPER(num_inputs=X_test.shape[1], hidden_dim=64, num_regimes=3, num_knots=8).to(device)
+    model = KASPER(num_inputs=X_eval.shape[1], hidden_dim=64, num_regimes=3, num_knots=8).to(device)
     model.fit_knots(torch.tensor(np.load(train_x_path), dtype=torch.float32).to(device))
     model.load_state_dict(torch.load(weights_path, map_location=device))
     model.eval()
 
-    with torch.no_grad():
-        y_hat_scaled_t, probs_t, _ = model(X_test_tensor, tau=0.3, deterministic=True)
+    y_mean = y_train_raw.mean()
+    y_std = y_train_raw.std()
 
-    y_hat_scaled = y_hat_scaled_t.cpu().numpy()
-    y_hat_unscaled = y_hat_scaled
+    with torch.no_grad():
+        y_hat_scaled_t, probs_t, _ = model(X_eval_tensor, tau=0.3, deterministic=True)
+
+    y_hat_norm = y_hat_scaled_t.cpu().numpy()
+    y_hat_unscaled = y_hat_norm * y_std + y_mean
     actual_returns = actual_returns_test
 
     print("\n" + "=" * 80)
@@ -91,8 +94,8 @@ def audit_model_and_data():
     else:
         feat_names = [f"Feature_{j}" for j in range(X_test.shape[1])]
 
-    for j in range(X_test.shape[1]):
-        feat_vals = X_test[:, j]
+    for j in range(X_eval.shape[1]):
+        feat_vals = X_eval[:, j]
         corr = np.corrcoef(feat_vals, y_hat_unscaled)[0, 1] if std_pred > 1e-12 else 0.0
         print(f"    - {feat_names[j]:22s} : Pearson r = {corr:+.6f}")
 
@@ -116,9 +119,8 @@ def audit_model_and_data():
     b_zero_pred = np.zeros_like(actual_returns)
     b_train_mean_pred = np.full_like(actual_returns, actual_returns_train.mean())
 
-    k_pos = np.sign(y_hat_unscaled)
-    # Handle exact 0 in predictions by defaulting to long
-    k_pos[k_pos == 0] = 1.0
+    # Demeaned signal (Long if predicted return > average predicted drift, Short if < average predicted drift)
+    k_pos = np.where(y_hat_norm > y_hat_norm.mean(), 1.0, -1.0)
 
     models_dict = {
         "Always-Long Baseline": (b_long_pos, b_train_mean_pred),
