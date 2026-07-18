@@ -11,12 +11,12 @@ class KASPER(nn.Module):
     Wires Layer 1 (RegimeDetectionLayer) and Layer 2 (RegimeAdaptiveForecastingLayer) together.
     """
 
-    def __init__(self, num_inputs=33, hidden_dim=64, num_regimes=3,
+    def __init__(self, num_inputs=8, hidden_dim=64, num_regimes=3,
                  grid_size=10, n_linear=3, n_cubic=2, dropout_rate=0.2,
                  num_knots=5, sparsity_threshold=1e-3, feature_embed_dim=4):
         """
         Args:
-            num_inputs (int): Flat input features size.
+            num_inputs (int): Flat input features size (default: 8 features via SelectKBest per Table 1).
             hidden_dim (int): Dimensionality of the latent representation.
             num_regimes (int): Total number of regimes (default: 3).
             grid_size (int): Grid size (not used in new implementation).
@@ -79,10 +79,9 @@ class KASPER(nn.Module):
         # 1. Evaluate Layer 1 to get probabilities and latent representations
         embeddings, probs, logits = self.layer1(phi_t, tau=tau, hard=hard)
 
-        # 2. Evaluate Layer 2 to get final predictions guided by the probabilities.
-        #    Standard joint gradient flow — the paper does not use stop-gradient.
+        # 2. Evaluate Layer 2 to get final predictions guided by the probabilities & attention.
         #    Layer 2 returns: (y_hat, forecast_per_regime, phi_per_regime)
-        final_forecast, _, _ = self.layer2(phi_t, probs)
+        final_forecast, _, _ = self.layer2(phi_t, probs, z=embeddings)
 
         return final_forecast, probs, embeddings
 

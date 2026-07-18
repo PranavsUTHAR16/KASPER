@@ -5,13 +5,20 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from kasper import KASPER
 
-# Core financial features from preprocessed SPY dataset (14 features)
-FEATURE_NAMES = [
-    "HL_Spread", "OC_Spread", "Log_Return_1d", "Log_Return_7d", 
-    "Log_Return_High_1d", "Log_Return_Low_1d", "Log_Return_Open_1d", 
-    "Log_Return_Volume_1d", "Rolling_Volatility_21d", "Volatility_Ratio_21d", 
-    "ATR_21d", "Velocity", "Acceleration", "Delta_Volume"
-]
+def load_feature_names():
+    selected_path = "data/selected_features.txt"
+    if os.path.exists(selected_path):
+        with open(selected_path, "r") as f:
+            names = [line.strip() for line in f if line.strip()]
+            if names:
+                return names
+    return [
+        "OC_Spread", "Log_Return_1d", "Log_Return_High_1d", "Log_Return_Low_1d",
+        "Log_Return_Open_1d", "ATR_21d", "Velocity", "Acceleration"
+    ]
+
+FEATURE_NAMES = load_feature_names()
+
 
 def get_regime_forecasts(model, phi_t):
     """
@@ -31,7 +38,7 @@ def get_regime_forecasts(model, phi_t):
 
 def estimate_shapley(model, x, num_permutations=50):
     """
-    Computes permutation-based Monte Carlo Shapley values for all inputs of a single sample.
+    Computes permutation-based Monte Carlo Shapley values for all inputs of a single sample (Eq. 24, 25).
     Evaluates the progressive feature subsets in parallel for speed.
     
     Args:
@@ -42,7 +49,7 @@ def estimate_shapley(model, x, num_permutations=50):
     Returns:
         torch.Tensor: Shapley values of shape (num_regimes, num_features).
     """
-    D = x.shape[0]  # 33 features
+    D = x.shape[0]  # num_features
     
     # Initialize Shapley values buffer
     shapley_values = torch.zeros(model.layer2.n_regimes, D, device=x.device)
@@ -52,7 +59,6 @@ def estimate_shapley(model, x, num_permutations=50):
         perm = torch.randperm(D, device=x.device)
         
         # Build batch of progressive subsets of shape (D + 1, D)
-        # batch_inputs[k] represents the coalition with the first k features in the permutation active
         batch_inputs = torch.zeros(D + 1, D, device=x.device)
         for k in range(1, D + 1):
             batch_inputs[k, :] = batch_inputs[k - 1, :].clone()
@@ -62,10 +68,9 @@ def estimate_shapley(model, x, num_permutations=50):
         y_hat = get_regime_forecasts(model, batch_inputs)
         
         # Compute marginal contributions (difference between step k and k-1)
-        # diffs shape: (D, num_regimes)
         diffs = y_hat[1:] - y_hat[:-1]
         
-        # Accumulate diffs into the corresponding permutation indices:
+        # Accumulate diffs into the corresponding permutation indices
         shapley_values.scatter_add_(1, perm.unsqueeze(0).expand(model.layer2.n_regimes, -1), diffs.t())
         
     # Average across all permutations
@@ -73,12 +78,33 @@ def estimate_shapley(model, x, num_permutations=50):
     return shapley_values
 
 
+def apply_temporal_weighting(shapley_tensor: torch.Tensor, gamma: float = 0.95) -> torch.Tensor:
+    """
+    Applies Eq. 26 temporal weighting scheme to sequence of Shapley values:
+    w_t = gamma^(T-t) / sum_{k=1}^T gamma^(T-k)
+
+    Args:
+        shapley_tensor: Tensor of shape (T, num_regimes, num_features).
+        gamma: Exponential decay factor.
+
+    Returns:
+        Temporally weighted Shapley values tensor of shape (num_regimes, num_features).
+    """
+    T = shapley_tensor.shape[0]
+    t_indices = torch.arange(1, T + 1, dtype=torch.float32, device=shapley_tensor.device)
+    raw_weights = gamma ** (T - t_indices)
+    weights = raw_weights / raw_weights.sum()  # shape (T,)
+
+    # Weighted sum across time dimension T
+    weighted_shapley = (shapley_tensor * weights.view(T, 1, 1)).sum(dim=0)
+    return weighted_shapley
+
+
 def main():
     print("--------------------------------------------------")
     print("KASPER Shapley Value Interpretability & Rule Extraction")
     print("--------------------------------------------------")
 
-    # Paths
     weights_path = "best_kasper.pth"
     test_x_path = "data/spy_test_X.npy"
     train_x_path = "data/spy_train_X.npy"
@@ -92,18 +118,15 @@ def main():
         print(f"Error: Required NumPy test dataset not found at '{test_x_path}'.")
         return
 
-    # 1. Device Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # 2. Load test set
     print("Loading test features...")
     X_test = np.load(test_x_path)
     print(f" - X_test shape: {X_test.shape} ([Batch, Features])")
     
     X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
 
-    # 3. Instantiate and Load KASPER Model
     batch_size, num_inputs = X_test.shape
     num_regimes = 3
 
@@ -115,11 +138,10 @@ def main():
         n_linear=3,
         n_cubic=2,
         dropout_rate=0.2,
-        num_knots=8, # maps to n_basis in new layer
+        num_knots=8,
         sparsity_threshold=1e-3
     ).to(device)
 
-    # Fit knots using training data to maintain identical scaling bounds
     if os.path.exists(train_x_path):
         print("Fitting quantile knots using training features...")
         model.fit_knots(torch.tensor(np.load(train_x_path), dtype=torch.float32).to(device))
@@ -128,76 +150,58 @@ def main():
 
     print(f"Loading weights from '{weights_path}'...")
     model.load_state_dict(torch.load(weights_path, map_location=device))
-    # Disable sparsity thresholding during explanation by filling theta_raw with a large negative value
     model.layer2.theta_raw.data.fill_(-100.0)
     model.eval()
 
-    # 4. Get assigned regimes from Layer 1 classification
     print("\nClassifying test set regimes using Layer 1...")
     with torch.no_grad():
         _, probs, _ = model.layer1(X_test_tensor.to(device), tau=1.0)
-    assigned_regimes = torch.argmax(probs, dim=-1).cpu()  # Shape: (B,)
-    
-    # Print sample distribution across regimes
+    assigned_regimes = torch.argmax(probs, dim=-1).cpu()
+
     for r in range(num_regimes):
         count = torch.sum(assigned_regimes == r).item()
         print(f" - Samples assigned to Regime {r}: {count:3d} ({count/batch_size*100.1:.1f}%)")
 
-    # 5. Compute Shapley Values for a subset of test samples for performance
-    num_samples_to_process = min(30, batch_size)
+    num_samples_to_process = min(50, batch_size)
     print(f"\nComputing Monte Carlo Shapley values for {num_samples_to_process} test samples...")
     print(f"Permutations per sample: 50 | Total features: {num_inputs}")
     all_shapley = []
     
     for i in range(num_samples_to_process):
-        if (i + 1) % 10 == 0 or i == 0:
-            print(f" - Processing sample {i+1:3d}/{num_samples_to_process:3d}...")
         x_sample = X_test_tensor[i].to(device)
-        # Get Shapley values shape: (num_regimes, num_inputs)
         shapley = estimate_shapley(model, x_sample, num_permutations=50)
         all_shapley.append(shapley.cpu())
 
-    # Stack to tensor: shape (num_samples, num_regimes, num_inputs)
     shapley_tensor = torch.stack(all_shapley, dim=0)
 
-    # 7. Aggregate attributions by assigned regime
+    # Apply Eq. 26 Temporal Weighting Scheme (gamma = 0.95)
+    print("\nApplying Eq. 26 Temporal Weighting Scheme (gamma = 0.95)...")
+    weighted_shapley_matrix = apply_temporal_weighting(shapley_tensor, gamma=0.95)
+
     print("\n" + "=" * 60)
-    print("REGIME-SPECIFIC ATTRIBUTIONS & RULE EXTRACTION")
+    print("REGIME-SPECIFIC ATTRIBUTIONS & RULE EXTRACTION (Eq. 27, 28)")
     print("=" * 60)
 
-    assigned_regimes_subset = assigned_regimes[:num_samples_to_process]
+    feature_names = FEATURE_NAMES[:num_inputs]
 
     for r in range(num_regimes):
-        indices = (assigned_regimes_subset == r).nonzero(as_tuple=True)[0]
-        
         print(f"\n>>> REGIME {r} Rules:")
-        if len(indices) == 0:
-            print("   No test samples assigned to this regime. Skipping rule extraction.")
-            continue
-            
-        # Select Shapley values for samples assigned to regime r: shape (count, num_inputs)
-        regime_attributions = shapley_tensor[indices, r, :]
-        # Average across all assigned samples to get global feature importance vector
-        mean_attribution = torch.mean(regime_attributions, dim=0)  # Shape: (num_inputs,)
+        regime_shapley = weighted_shapley_matrix[r, :]  # shape: (num_inputs,)
 
-        # Sort features by absolute contribution to extract top 3 rules
-        sorted_idx = torch.argsort(torch.abs(mean_attribution), descending=True)
+        sorted_idx = torch.argsort(torch.abs(regime_shapley), descending=True)
 
-        print(f"   Sample size: {len(indices)}")
-        print("   Top 3 Most Influential Features:")
         print("-" * 50)
-        print(f"   {'FEATURE NAME':25s} | {'ATTRIBUTION VALUE':18s}")
+        print(f"   {'FEATURE NAME':25s} | {'SHAPLEY ATTRIBUTION':18s}")
         print("-" * 50)
-        for rank in range(3):
+        for rank in range(min(3, num_inputs)):
             feat_idx = sorted_idx[rank].item()
-            feat_name = FEATURE_NAMES[feat_idx]
-            feat_val = mean_attribution[feat_idx].item()
+            feat_name = feature_names[feat_idx] if feat_idx < len(feature_names) else f"Feature_{feat_idx}"
+            feat_val = regime_shapley[feat_idx].item()
             print(f"   {feat_name:25s} | {feat_val:+.4e}")
         print("-" * 50)
 
-        # Output readable rules
-        top_feats = [FEATURE_NAMES[sorted_idx[k].item()] for k in range(3)]
-        print(f"   Rule Statement: Regime {r} pricing dynamics are primarily driven by:")
+        top_feats = [feature_names[sorted_idx[k].item()] for k in range(min(3, num_inputs))]
+        print(f"   Symbolic Rule (Eq. 28): Regime {r} : {' + '.join(top_feats)} -> Y_{r}")
         print(f"                   1. {top_feats[0]} (major driver)")
         print(f"                   2. {top_feats[1]}")
         print(f"                   3. {top_feats[2]}")

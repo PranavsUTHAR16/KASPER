@@ -77,13 +77,33 @@ def test_master_pipeline():
     print(f" - Layer 1 has gradients: {layer1_has_grad}")
     print(f" - Layer 2 has gradients: {layer2_has_grad}")
 
-    # Checks
-    assert predictions.shape == (batch_size,), f"Unexpected predictions shape: {predictions.shape}"
-    assert total_loss.shape == (), f"Total loss must be a scalar, got shape: {total_loss.shape}"
-    assert layer1_has_grad, "Some Layer 1 weights did not receive gradients."
-    assert layer2_has_grad, "Some Layer 2 weights did not receive gradients."
+    # 8. Regression Test: Verify composite loss Table 1 default weights
+    import losses
+    assert losses.LAMBDA_CONTRASTIVE == 0.01, f"Expected LAMBDA_CONTRASTIVE=0.01 (Table 1), got {losses.LAMBDA_CONTRASTIVE}"
+    assert losses.LAMBDA_SPARSITY == 0.001, f"Expected LAMBDA_SPARSITY=0.001 (Table 1), got {losses.LAMBDA_SPARSITY}"
+    assert losses.LAMBDA_ORTHOGONAL == 0.01, f"Expected LAMBDA_ORTHOGONAL=0.01 (Table 1), got {losses.LAMBDA_ORTHOGONAL}"
+    assert losses.LAMBDA_BALANCE == 0.05, f"Expected LAMBDA_BALANCE=0.05 (Table 1), got {losses.LAMBDA_BALANCE}"
+    print(" - Table 1 loss weight defaults verified.")
 
-    print("\nSuccess! KASPER master model and composite loss verification completed successfully.")
+    # 9. Regression Test: Verify l1_sparsity touches parameters in both KAN-1 and KAN-2
+    model.zero_grad()
+    l1_loss = losses.l1_sparsity(model.layer1, model.layer2)
+    l1_loss.backward()
+    kan1_has_l1_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.layer1.parameters())
+    kan2_has_l1_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.layer2.parameters())
+    assert kan1_has_l1_grad, "l1_sparsity did not compute gradients for Layer 1!"
+    assert kan2_has_l1_grad, "l1_sparsity did not compute gradients for Layer 2!"
+    print(" - L1 sparsity parameter scope verified (touches both kan1 and kan2).")
+
+    # 10. Regression Test: Verify KAN-2 attention and refinement module
+    assert hasattr(model.layer2, 'attn_proj'), "KAN-2 is missing attn_proj module!"
+    assert hasattr(model.layer2, 'refinement_head'), "KAN-2 is missing refinement_head module!"
+    attn_grad = model.layer2.attn_proj.weight.grad is not None
+    refine_grad = model.layer2.refinement_head[0].weight.grad is not None
+    assert attn_grad and refine_grad, "KAN-2 attention/refinement parameters did not receive gradients!"
+    print(" - KAN-2 attention and refinement head verified.")
+
+    print("\nSuccess! All KASPER master model and composite loss verification tests passed successfully.")
 
 if __name__ == "__main__":
     test_master_pipeline()

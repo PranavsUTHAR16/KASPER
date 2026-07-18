@@ -135,8 +135,17 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
         # w_j^(r): trainable per-feature, per-regime forecast weights (Eq. 20)
         self.weights = nn.Parameter(torch.randn(n_regimes, n_features) * 0.1)
         # theta^(r): regime-specific sparsity threshold, kept non-negative via softplus.
-        # softplus(-6.0) ≈ 0.0025 — small initial threshold, prevents premature pruning of weaker directional features.
         self.theta_raw = nn.Parameter(torch.full((n_regimes,), -6.0))
+
+        # Fidelity Note (Fig. 2 Caption): KAN-2 Attention-based Aggregation & Final Refinement Head
+        # "produces regime-adaptive forecasts by updating a sparsity mask over spline components
+        # and computing attention-based aggregation before the final refinement."
+        self.attn_proj = nn.Linear(n_regimes, n_regimes)
+        self.refinement_head = nn.Sequential(
+            nn.Linear(1, 16),
+            nn.GELU(),
+            nn.Linear(16, 1)
+        )
 
     def sparsity_threshold(self) -> torch.Tensor:
         return F.softplus(self.theta_raw)  # (n_regimes,)
@@ -147,14 +156,15 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
         w = self.weights
         return torch.sign(w) * F.relu(w.abs() - theta)
 
-    def forward(self, phi_t: torch.Tensor, p: torch.Tensor):
+    def forward(self, phi_t: torch.Tensor, p: torch.Tensor, z: torch.Tensor = None):
         """
         Args:
             phi_t: (batch, n_features) input feature matrix (same Phi_t as KAN 1).
             p:     (batch, n_regimes)  soft regime probabilities from KAN 1.
+            z:     (batch, hidden_dim) optional pre-softmax embedding from KAN 1 for attention.
 
         Returns:
-            y_hat:                 (batch,)                    final aggregated forecast
+            y_hat:                 (batch,)                    final aggregated & refined forecast
             forecast_per_regime:   (batch, n_regimes)           y_hat^(r)_t per regime
             phi_per_regime:        (batch, n_regimes, n_features)  phi_j^(r)(Phi_t) values
         """
@@ -167,7 +177,15 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
                 phi_per_regime[:, r, j] = self.splines[r][j](phi_t[:, j])
 
         forecast_per_regime = (phi_per_regime * w_eff.unsqueeze(0)).sum(-1)  # Eq. 20, (batch, n_regimes)
-        y_hat = (forecast_per_regime * p).sum(-1)  # weighted aggregation, (batch,)
+        
+        # 1. Attention-based Aggregation (Fig. 2 Caption)
+        attn_logits = self.attn_proj(forecast_per_regime)
+        attn_weights = F.softmax(attn_logits + torch.log(p.clamp_min(1e-8)), dim=-1)
+        y_agg = (forecast_per_regime * attn_weights).sum(-1)  # (batch,)
+
+        # 2. Final Refinement Head with residual connection (Fig. 2 Caption)
+        refinement = self.refinement_head(y_agg.unsqueeze(1)).squeeze(1)
+        y_hat = y_agg + refinement  # (batch,)
 
         return y_hat, forecast_per_regime, phi_per_regime
 
@@ -178,7 +196,7 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
     def orthogonality_loss(self) -> torch.Tensor:
         """L_orth = || W_norm W_norm^T - I_R ||_F^2   (Eq. 19)
 
-        W = self.weights  (n_regimes, n_features) — the paper's W_r = [w^(r)_1,...,w^(r)_F].
+        W = Layer-2 forecast weights w_j^(r) (Eq. 19 target), not a separate parameter.
         Forcing regime forecast-weight rows to be orthogonal means each regime relies on a
         distinct combination of input features, directly producing the per-regime feature
         differentiation seen in Fig. 4 of the paper.

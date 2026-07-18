@@ -9,30 +9,36 @@ import matplotlib.pyplot as plt
 
 from kasper import KASPER
 
-# Core financial features from preprocessed SPY dataset (14 features)
-FEATURE_NAMES = [
-    "HL_Spread", "OC_Spread", "Log_Return_1d", "Log_Return_7d", 
-    "Log_Return_High_1d", "Log_Return_Low_1d", "Log_Return_Open_1d", 
-    "Log_Return_Volume_1d", "Rolling_Volatility_21d", "Volatility_Ratio_21d", 
-    "ATR_21d", "Velocity", "Acceleration", "Delta_Volume"
-]
+def load_feature_names():
+    selected_path = "data/selected_features.txt"
+    if os.path.exists(selected_path):
+        with open(selected_path, "r") as f:
+            names = [line.strip() for line in f if line.strip()]
+            if names:
+                return names
+    return [
+        "OC_Spread", "Log_Return_1d", "Log_Return_High_1d", "Log_Return_Low_1d", 
+        "Log_Return_Open_1d", "ATR_21d", "Velocity", "Acceleration"
+    ]
+
+FEATURE_NAMES = load_feature_names()
 
 def regime_feature_importance(X: np.ndarray, feature_names: list, assignments: np.ndarray):
     """
-    Diagnostic only. Ranks all 14 input features by how strongly they differ
-    across discovered regimes (one-way ANOVA F-stat) — tells you definitively
-    which axis the split landed on, rather than inferring it indirectly.
+    Diagnostic only. Ranks input features by how strongly they differ
+    across discovered regimes (one-way ANOVA F-stat).
     """
     from scipy import stats
     import pandas as pd
     rows = []
-    # Find unique regimes that have at least some samples
     unique_regimes = [r for r in np.unique(assignments) if (assignments == r).sum() > 1]
     if len(unique_regimes) < 2:
         print("\n  ANOVA Diagnostic skipped: Fewer than 2 active regimes with > 1 samples.")
         return None
         
-    for j, name in enumerate(feature_names):
+    num_feats = min(len(feature_names), X.shape[1])
+    for j in range(num_feats):
+        name = feature_names[j]
         groups = [X[assignments == r, j] for r in unique_regimes]
         try:
             f_stat, p_val = stats.f_oneway(*groups)
@@ -62,11 +68,15 @@ def calculate_financial_metrics(strategy_returns, actual_returns, y_hat, active_
     Returns:
         dict: Calculated metrics.
     """
-    # 1. Global Financial Metrics
+    # 1. Global Financial & Statistical Metrics (Table 1)
     direction_acc = np.mean(np.sign(y_hat) == np.sign(actual_returns)) * 100.0
     win_rate = np.mean(strategy_returns > 0) * 100.0
     cum_returns = (np.prod(1.0 + strategy_returns) - 1.0) * 100.0
     actual_cum_returns = (np.prod(1.0 + actual_returns) - 1.0) * 100.0
+
+    gains = strategy_returns[strategy_returns > 0].sum()
+    losses = np.abs(strategy_returns[strategy_returns < 0].sum())
+    profit_factor = gains / (losses + 1e-8)
 
     std_returns = np.std(strategy_returns)
     sharpe = (np.mean(strategy_returns) / (std_returns + 1e-8)) * np.sqrt(252.0) if std_returns > 0 else 0.0
@@ -77,17 +87,24 @@ def calculate_financial_metrics(strategy_returns, actual_returns, y_hat, active_
     drawdowns = (cumulative_equity - running_max) / running_max
     max_dd = drawdowns.min() * 100.0
 
-    # 2. Global Machine Learning Metrics
+    # 2. Global Statistical Metrics (Table 1)
     global_r2 = r2_score(actual_returns, y_hat)
     global_mse = mean_squared_error(actual_returns, y_hat)
+    global_rmse = np.sqrt(global_mse)
+    global_mae = np.mean(np.abs(actual_returns - y_hat))
+    pearson_r = np.corrcoef(actual_returns, y_hat)[0, 1] if len(actual_returns) > 1 else 0.0
 
     print("\n" + "=" * 60)
     print(f"GLOBAL PERFORMANCE SUMMARY ({dataset_type.upper()} SET)")
     print("=" * 60)
+    print(f"{'Global Pearson R':30s} | {pearson_r:.6f}")
     print(f"{'Global R^2 Score':30s} | {global_r2:.6f}")
     print(f"{'Global Mean Squared Error':30s} | {global_mse:.6f}")
+    print(f"{'Global Root Mean Sq Error':30s} | {global_rmse:.6f}")
+    print(f"{'Global Mean Absolute Error':30s} | {global_mae:.6f}")
     print(f"{'Direction Accuracy (%)':30s} | {direction_acc:.4f}%")
     print(f"{'Win Rate (%)':30s} | {win_rate:.4f}%")
+    print(f"{'Profit Factor':30s} | {profit_factor:.4f}")
     print(f"{'Strategy Cumulative Return (%)':30s} | {cum_returns:.4f}%")
     print(f"{'Market Cumulative Return (%)':30s} | {actual_cum_returns:.4f}%")
     print(f"{'Annualized Sharpe Ratio':30s} | {sharpe:.4f}")

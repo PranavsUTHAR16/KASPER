@@ -75,12 +75,9 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.7, patience=7)
 
-    # 7. Early Stopping — patience raised to 40 to allow full 100-epoch run.
-    # Paper Table 1 says patience=15, but SPY's near-random returns cause val Huber
-    # to plateau early; the orthogonality on layer2.weights needs more epochs to
-    # push regimes apart via the Huber gradient signal.
+    # 7. Early Stopping — paper Table 1 specifies patience=15 on validation loss.
     best_val_huber = float('inf')
-    early_stopping_patience = 40
+    early_stopping_patience = 15
     epochs_no_improve = 0
     max_epochs = 100
 
@@ -94,10 +91,7 @@ def main():
 
     for epoch in range(1, max_epochs + 1):        # Calculate current tau temperature
         current_tau = max(tau_end, tau_start * (tau_decay ** (epoch - 1)))
-
-        # Ramp sparsity from 0→0.0001 over 30 epochs to prevent over-pruning of weak signals
-        progress = min(epoch / 30.0, 1.0)
-        current_sparsity_lambda = 0.0001 * progress
+        current_sparsity_lambda = 0.001  # Table 1: lambda_sparsity = 0.001
 
         # --- TRAINING PHASE ---
         model.train()
@@ -113,7 +107,8 @@ def main():
             # Forward Pass: P_t^(r) (probs), z_i (embeddings), and prediction (y_hat)
             y_hat, probs, embeddings = model(x_batch, tau=current_tau)
 
-            # Evaluate composite loss with warm-up sparsity lambda (include_balance=True for mild balance guidance)
+            # Note: include_balance=True adds the unverified regime balance penalty (L_balance).
+            # The paper describes regime balance in prose (Sec. 3.2.4) without giving a closed-form equation.
             loss_dict = composite_loss(
                 y_hat=y_hat,
                 y_true=y_batch,

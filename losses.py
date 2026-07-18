@@ -43,10 +43,10 @@ import torch.nn.functional as F
 from regime_detection import RegimeDetectionLayer, contrastive_loss
 from regime_forecasting import RegimeAdaptiveForecastingLayer
 
-LAMBDA_SPARSITY = 0.001
-LAMBDA_CONTRASTIVE = 0.5   # raised to 0.5 to force strong cluster separation in embedding space (avoiding collapse)
+LAMBDA_SPARSITY = 0.001     # Table 1: L1 parameter sparsity penalty weight
+LAMBDA_CONTRASTIVE = 0.01   # Table 1: contrastive loss weight
 LAMBDA_ORTHOGONAL = 0.01    # Table 1: orthogonality regularization weight
-LAMBDA_BALANCE = 0.01  # lowered from 0.05 to allow more concentrated/unbalanced regimes (e.g., smaller but cleaner bear regime)
+LAMBDA_BALANCE = 0.05       # Table 1: regime balance penalty weight
 
 
 def l1_sparsity(*modules: torch.nn.Module) -> torch.Tensor:
@@ -56,7 +56,7 @@ def l1_sparsity(*modules: torch.nn.Module) -> torch.Tensor:
         for param in module.parameters():
             term = param.abs().sum()
             total = term if total is None else total + term
-    return total
+    return total if total is not None else torch.tensor(0.0)
 
 
 def unverified_regime_balance_penalty(p: torch.Tensor) -> torch.Tensor:
@@ -96,13 +96,13 @@ def composite_loss(
         lambda_s:      dynamic weight for L1 parameter sparsity penalty.
     """
     l_huber = F.huber_loss(y_hat, y_true)
-    # Sparsity restricted to Layer 2 forecasting parameters only (consistent with flowchart / task alignment)
-    l_sparsity = kan2.sparsity_loss()
+    # Eq. 23: L1 parameter sparsity term sums |p| over all trainable parameters Theta in both kan1 and kan2
+    l_sparsity = l1_sparsity(kan1, kan2)
     l_contrastive = contrastive_loss(z, regime_ids)
     # Eq. 19: orthogonality on kan2.weights (W ∈ R^{R×F}, w^(r)_j = forecast weight for feature j in regime r)
     l_orth = kan2.orthogonality_loss()
 
-    # Rebalanced: Enforce orthogonality and contrastive constraints more strongly
+    # Composite loss calculation (Eq. 23)
     total = (
         1.0 * l_huber
         + lambda_s * l_sparsity

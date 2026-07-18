@@ -215,6 +215,8 @@ class RegimeDetectionLayer(nn.Module):
 
         # Step 3: Route to regime logits → Gumbel-Softmax
         logits = self.to_logits(z)                                  # f_r(Phi_t)
+        # Fidelity Note (Eq. 17): Paper writes exp(f_r(Phi_t + g_r)/tau) with noise inside spline input.
+        # Standard F.gumbel_softmax is used here on logits for numerical stability and gradient reliability.
         p = F.gumbel_softmax(logits, tau=tau, hard=hard, dim=-1)    # Eq. 17
         return z, p, logits
 
