@@ -101,7 +101,15 @@ def test_master_pipeline():
     attn_grad = model.layer2.attn_proj.weight.grad is not None
     refine_grad = model.layer2.refinement_head[0].weight.grad is not None
     assert attn_grad and refine_grad, "KAN-2 attention/refinement parameters did not receive gradients!"
-    print(" - KAN-2 attention and refinement head verified.")
+    # 11. Regression Test: Verify evaluation consistency (effective_weights / sparsity threshold is unchanged during eval)
+    w_effective_before = model.layer2.effective_weights().clone().detach()
+    # Perform eval pass
+    model.eval()
+    with torch.no_grad():
+        _ = model(phi_t)
+    w_effective_after = model.layer2.effective_weights().clone().detach()
+    assert torch.equal(w_effective_before, w_effective_after), "Evaluation path mutated effective_weights or sparsity threshold!"
+    print(" - Evaluation consistency verified (sparsity threshold/effective_weights preserved).")
 
     print("\nSuccess! All KASPER master model and composite loss verification tests passed successfully.")
 

@@ -150,7 +150,6 @@ def main():
 
     print(f"Loading weights from '{weights_path}'...")
     model.load_state_dict(torch.load(weights_path, map_location=device))
-    model.layer2.theta_raw.data.fill_(-100.0)
     model.eval()
 
     print("\nClassifying test set regimes using Layer 1...")

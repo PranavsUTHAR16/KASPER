@@ -244,7 +244,7 @@ def calculate_financial_metrics(strategy_returns, actual_returns, y_hat, active_
     }
 
 
-def evaluate_model(dataset_type="test"):
+def evaluate_model(dataset_type="test", unpruned=False):
     print("--------------------------------------------------")
     print(f"KASPER Model Inference and Financial Evaluation ({dataset_type.upper()} Set)")
     print("--------------------------------------------------")
@@ -317,8 +317,9 @@ def evaluate_model(dataset_type="test"):
 
     print(f"Loading weights from '{weights_path}'...")
     model.load_state_dict(torch.load(weights_path, map_location=device))
-    # Disable sparsity thresholding during evaluation to analyze unpruned weights by filling theta_raw with a large negative value
-    model.layer2.theta_raw.data.fill_(-100.0)
+    if unpruned:
+        print("  [Ablation mode: disabling sparsity thresholding via theta_raw fill]")
+        model.layer2.theta_raw.data.fill_(-100.0)
     model.eval()
 
     # 5. Run Model Inference
